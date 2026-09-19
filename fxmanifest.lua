@@ -16,6 +16,8 @@ server_scripts {
     'server/capabilities.lua',
     'server/roles.lua',
     'server/grants.lua',
+    'server/assignments.lua',
+    'server/evaluation.lua',
     'server/main.lua'
 }
 

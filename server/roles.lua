@@ -147,6 +147,7 @@ function AuthorityRoles.Create(request, resource)
                 WHERE `source_resource`=? AND `request_id`=?]], {
                 json.encode(created.value), resource, request.requestId
             })
+            query('UPDATE `feather_authority_policy_state` SET `policy_version`=`policy_version`+1 WHERE `id`=1')
             return created
         end, debug.traceback)
         if not executed then

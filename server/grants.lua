@@ -106,6 +106,7 @@ function AuthorityGrants.Issue(request, resource)
             query([[UPDATE `feather_authority_role_grant_receipts` SET `result_json`=?
                 WHERE `source_resource`=? AND `request_id`=?]],
                 { json.encode(value), resource, request.requestId })
+            query('UPDATE `feather_authority_policy_state` SET `policy_version`=`policy_version`+1 WHERE `id`=1')
             return Ok(value)
         end, debug.traceback)
         if not executed then result = Err('internal_error', 'Grant transaction failed.'); return false end

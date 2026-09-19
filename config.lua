@@ -16,6 +16,10 @@ Config = {
         trustedGrantors = {
             ['feather-authority'] = true,
             ['feather-admin'] = true
+        },
+        trustedAssigners = {
+            ['feather-authority'] = true,
+            ['feather-admin'] = true
         }
     },
     Capabilities = {

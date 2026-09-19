@@ -75,7 +75,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
         local tests = {
             { 'capabilities', capabilities.ok and capabilities.value.contract == 1
                 and capabilities.value.features.capabilityRegistry == 1
-                and capabilities.value.features.assignments == 0 },
+                and capabilities.value.features.assignments == 1 },
             { 'health ready', health.ok and health.value.state == 'ready' },
             { 'bounded catalog', listed.ok and #listed.value == #Config.Capabilities and #listed.value <= 128 },
             { 'staff namespace', Valid(staff, 'staff.authority.manage', 'staff') },
@@ -87,7 +87,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
             { 'await ready', Authority.AwaitReady(0).ok },
             { 'persisted identity', staff.ok and persisted
                 and persisted.capability_id == staff.value.capabilityId },
-            { 'migration ledger', tonumber(migrations) == 3 }
+            { 'migration ledger', tonumber(migrations) == 6 }
         }
         local passed = 0
         for _, test in ipairs(tests) do
@@ -97,6 +97,182 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
         print(('[AuthorityFoundationSmokeTest] done %d/%d passed (read-only)'):format(passed, #tests))
     end, debug.traceback)
     if not called then print('[AuthorityFoundationSmokeTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        local valid = { requestId = 'authority-assignment-contract-001', subjectType = 'account',
+            subjectId = '00000000-0000-4000-8000-000000000001',
+            roleId = '00000000-0000-4000-8000-000000000002', expectedRoleRevision = 2,
+            scopeType = 'server', validUntil = 1893456000, reason = 'Contract acceptance',
+            reasonCode = 'development.contract' }
+        local first = AuthorityAssignments.ValidateIssue(valid)
+        local same = AuthorityAssignments.ValidateIssue(Authority.Copy(valid))
+        local changed = Authority.Copy(valid); changed.reason = 'Changed reason'
+        local changedResult = AuthorityAssignments.ValidateIssue(changed)
+        local function Rejected(field, value)
+            local request = Authority.Copy(valid); request[field] = value
+            return not AuthorityAssignments.ValidateIssue(request).ok
+        end
+        local injected = Authority.Copy(valid); injected.assignmentId = valid.subjectId
+        local untrusted = AuthorityAssignments.Issue(valid, 'untrusted-smoke-caller')
+        local tests = {
+            { 'assignment contract', Authority.GetCapabilities().value.features.assignmentContracts == 1
+                and Authority.GetCapabilities().value.features.assignments == 1 },
+            { 'valid account assignment', first.ok },
+            { 'untrusted rejected', not untrusted.ok and untrusted.code == 'authorization_denied' },
+            { 'stable fingerprint', same.ok and same.value == first.value },
+            { 'payload binding', changedResult.ok and changedResult.value ~= first.value },
+            { 'character subject rejected', Rejected('subjectType', 'character') },
+            { 'bad subject rejected', Rejected('subjectId', 'not-a-uuid') },
+            { 'bad role rejected', Rejected('roleId', 'not-a-uuid') },
+            { 'zero revision rejected', Rejected('expectedRoleRevision', 0) },
+            { 'unknown scope rejected', Rejected('scopeType', 'organization') },
+            { 'fractional expiry rejected', Rejected('validUntil', 1.5) },
+            { 'blank reason rejected', Rejected('reason', '   ') },
+            { 'identity injection rejected', not AuthorityAssignments.ValidateIssue(injected).ok }
+        }
+        local passed = 0
+        for _, test in ipairs(tests) do
+            if test[2] then passed = passed + 1 end
+            print(('[AuthorityAssignmentContractSmokeTest] %-27s %s'):format(
+                test[1], test[2] and 'PASS' or 'FAIL'))
+        end
+        print(('[AuthorityAssignmentContractSmokeTest] done %d/%d passed (no assignments created)'):format(
+            passed, #tests))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentContractSmokeTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentLiveTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 3 and tonumber(args[1])
+            and Authority.Uuid(args[2]) and type(args[3]) == 'string',
+            'Use <player source> <role UUID> <stable requestId>')
+        local account = exports['feather-core']:GetAccountContext(tonumber(args[1]))
+        assert(account.ok, 'Active Core account context required for the acceptance test')
+        local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
+        assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
+        local request = { requestId = args[3], subjectType = 'account',
+            subjectId = account.value.accountId, roleId = role.value.roleId,
+            expectedRoleRevision = role.value.revision, scopeType = 'server',
+            reason = 'Authority assignment live acceptance', reasonCode = 'development.live_test' }
+        local first = AuthorityAssignments.Issue(request, GetCurrentResourceName())
+        assert(first.ok, tostring(first.code) .. ': ' .. tostring(first.message))
+        local replay = AuthorityAssignments.Issue(request, GetCurrentResourceName())
+        assert(replay.ok and replay.value.replayed and replay.value.assignmentId == first.value.assignmentId,
+            'Exact assignment did not replay its identity')
+        local mismatch = Authority.Copy(request); mismatch.reason = 'Changed reason'
+        local mismatchResult = AuthorityAssignments.Issue(mismatch, GetCurrentResourceName())
+        assert(not mismatchResult.ok and mismatchResult.code == 'idempotency_conflict',
+            'Changed assignment payload did not conflict')
+        local stale = Authority.Copy(request); stale.requestId = args[3] .. ':stale'
+        stale.expectedRoleRevision = math.max(1, role.value.revision - 1)
+        local staleResult = AuthorityAssignments.Issue(stale, GetCurrentResourceName())
+        assert(not staleResult.ok and (role.value.revision == 1
+            and staleResult.code == 'assignment_conflict' or staleResult.code == 'revision_conflict'),
+            'Stale role revision was accepted')
+        local read = AuthorityAssignments.Get({ assignmentId = first.value.assignmentId }, GetCurrentResourceName())
+        assert(read.ok and read.value.subjectId == account.value.accountId
+            and read.value.issuerId == GetCurrentResourceName(), 'Assignment attribution is invalid')
+        local assignmentCount = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
+            `feather_authority_assignments` WHERE `assignment_id`=?]], { first.value.assignmentId }))
+        local eventCount = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
+            `feather_authority_assignment_events` WHERE `assignment_id`=?]], { first.value.assignmentId }))
+        assert(assignmentCount == 1 and eventCount == 1,
+            'Assignment did not produce exactly one identity and audit event')
+        print(('[AuthorityAssignmentLiveTest] PASS assignment=%s account=%s role=%s firstReplayed=%s replayed=true mismatchRejected=true staleRejected=true attribution=true singleAssignmentAudit=true'):format(
+            first.value.assignmentId, account.value.accountId, role.value.roleId,
+            tostring(first.value.replayed)))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentLiveTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentOfflineReplayTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 3 and Authority.Uuid(args[1])
+            and Authority.Uuid(args[2]) and type(args[3]) == 'string',
+            'Use <account UUID> <role UUID> <original requestId>')
+        local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
+        assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
+        local request = { requestId = args[3], subjectType = 'account', subjectId = args[1],
+            roleId = args[2], expectedRoleRevision = role.value.revision, scopeType = 'server',
+            reason = 'Authority assignment live acceptance', reasonCode = 'development.live_test' }
+        local replay = AuthorityAssignments.Issue(request, GetCurrentResourceName())
+        assert(replay.ok and replay.value.replayed == true,
+            tostring(replay.code) .. ': original assignment did not replay')
+        local identity = exports['feather-core']:GetAccountIdentity(args[1])
+        local read = AuthorityAssignments.Get({ assignmentId = replay.value.assignmentId },
+            GetCurrentResourceName())
+        local events = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
+            `feather_authority_assignment_events` WHERE `assignment_id`=?]],
+            { replay.value.assignmentId }))
+        assert(identity.ok and read.ok and read.value.subjectId == identity.value.accountId
+            and events == 1, 'Offline assignment identity or audit evidence changed')
+        print(('[AuthorityAssignmentOfflineReplayTest] PASS assignment=%s account=%s role=%s replayed=true activeSessionNotRequired=true singleAssignmentAudit=true'):format(
+            replay.value.assignmentId, identity.value.accountId, role.value.roleId))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentOfflineReplayTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityEvaluationContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local base = { subjectType = 'account', subjectId = '00000000-0000-4000-8000-000000000001',
+        capabilityKey = 'staff.players.view', scopeType = 'server' }
+    local function Rejected(field, value)
+        local request = Authority.Copy(base); request[field] = value
+        return not AuthorityEvaluation.Validate(request).ok
+    end
+    local injected = Authority.Copy(base); injected.source = 1
+    local denied = AuthorityEvaluation.Evaluate(base, 'untrusted-smoke-caller')
+    local unknown = Authority.Copy(base); unknown.capabilityKey = 'staff.unknown.contract'
+    local unknownResult = AuthorityEvaluation.Evaluate(unknown, GetCurrentResourceName())
+    local tests = {
+        { 'evaluation capability', Authority.GetCapabilities().value.features.scopedEvaluation == 1 },
+        { 'valid request', AuthorityEvaluation.Validate(base).ok },
+        { 'untrusted rejected', not denied.ok and denied.code == 'authorization_denied' },
+        { 'character rejected', Rejected('subjectType', 'character') },
+        { 'bad subject rejected', Rejected('subjectId', 'not-a-uuid') },
+        { 'bad capability rejected', Rejected('capabilityKey', 'staff..view') },
+        { 'unknown scope rejected', Rejected('scopeType', 'organization') },
+        { 'identity injection rejected', not AuthorityEvaluation.Validate(injected).ok },
+        { 'unknown capability denied', unknownResult.ok and not unknownResult.value.allowed
+            and unknownResult.value.reason == 'capability_unavailable' },
+        { 'policy version returned', unknownResult.ok
+            and Authority.Integer(unknownResult.value.policyVersion, 1, 9007199254740991) }
+    }
+    local passed = 0
+    for _, test in ipairs(tests) do
+        if test[2] then passed = passed + 1 end
+        print(('[AuthorityEvaluationContractSmokeTest] %-27s %s'):format(
+            test[1], test[2] and 'PASS' or 'FAIL'))
+    end
+    print(('[AuthorityEvaluationContractSmokeTest] done %d/%d passed (read-only)'):format(passed, #tests))
+end, true)
+
+Authority.RegisterDevCommand('AuthorityEvaluationLiveTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 1 and Authority.Uuid(args[1]),
+            'Use <account UUID>')
+        local allow = AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = args[1],
+            capabilityKey = 'staff.players.view', scopeType = 'server' }, GetCurrentResourceName())
+        local deny = AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = args[1],
+            capabilityKey = 'staff.economy.adjust', scopeType = 'server' }, GetCurrentResourceName())
+        assert(allow.ok and allow.value.allowed and allow.value.reason == 'explicit_role_grant'
+            and Authority.Uuid(allow.value.assignmentId) and Authority.Uuid(allow.value.roleId)
+            and Authority.Uuid(allow.value.grantId), 'Expected explicit role grant allow')
+        assert(deny.ok and not deny.value.allowed and deny.value.reason == 'no_active_assignment',
+            'Ungrantable capability did not deny')
+        assert(allow.value.policyVersion == deny.value.policyVersion,
+            'Read-only decisions observed inconsistent policy versions')
+        print(('[AuthorityEvaluationLiveTest] PASS account=%s allowed=true reason=%s denied=true denyReason=%s policyVersion=%d attribution=true activeSessionNotRequired=true'):format(
+            args[1], allow.value.reason, deny.value.reason, allow.value.policyVersion))
+    end, debug.traceback)
+    if not called then print('[AuthorityEvaluationLiveTest] FAIL ' .. tostring(reason)) end
 end, true)
 
 Authority.RegisterDevCommand('AuthorityRoleGrantContractSmokeTest', function(source)

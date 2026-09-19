@@ -96,6 +96,76 @@ local definitions = {
                 PRIMARY KEY (`source_resource`,`request_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
         }
+    },
+    {
+        id = '004_account_assignments',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_assignments` (
+                `assignment_id` CHAR(36) NOT NULL,
+                `subject_type` VARCHAR(32) NOT NULL,
+                `subject_id` CHAR(36) NOT NULL,
+                `role_id` CHAR(36) NOT NULL,
+                `issuer_type` VARCHAR(32) NOT NULL,
+                `issuer_id` VARCHAR(100) NOT NULL,
+                `scope_type` VARCHAR(24) NOT NULL,
+                `valid_from` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `valid_until` TIMESTAMP NULL,
+                `status` VARCHAR(16) NOT NULL DEFAULT 'active',
+                `reason` VARCHAR(255) NOT NULL,
+                `revision` BIGINT UNSIGNED NOT NULL DEFAULT 1,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `revoked_at` TIMESTAMP NULL,
+                PRIMARY KEY (`assignment_id`),
+                KEY `idx_authority_subject_assignments` (`subject_type`,`subject_id`,`status`),
+                CONSTRAINT `fk_authority_assignment_role` FOREIGN KEY (`role_id`)
+                    REFERENCES `feather_authority_roles` (`role_id`),
+                CONSTRAINT `chk_authority_assignment_subject` CHECK (`subject_type`='account'),
+                CONSTRAINT `chk_authority_assignment_issuer` CHECK (`issuer_type`='service_principal'),
+                CONSTRAINT `chk_authority_assignment_scope` CHECK (`scope_type`='server'),
+                CONSTRAINT `chk_authority_assignment_status`
+                    CHECK (`status` IN ('active','suspended','revoked'))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_assignment_receipts` (
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `request_fingerprint` LONGTEXT NOT NULL,
+                `result_json` LONGTEXT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`source_resource`,`request_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
+    },
+    {
+        id = '005_assignment_events',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_assignment_events` (
+                `event_id` CHAR(36) NOT NULL,
+                `assignment_id` CHAR(36) NOT NULL,
+                `event_type` VARCHAR(64) NOT NULL,
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `reason_code` VARCHAR(64) NOT NULL,
+                `revision` BIGINT UNSIGNED NOT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`event_id`),
+                UNIQUE KEY `uq_authority_assignment_event_request` (`source_resource`,`request_id`),
+                CONSTRAINT `fk_authority_assignment_event` FOREIGN KEY (`assignment_id`)
+                    REFERENCES `feather_authority_assignments` (`assignment_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
+    },
+    {
+        id = '006_policy_version',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_policy_state` (
+                `id` TINYINT UNSIGNED NOT NULL,
+                `policy_version` BIGINT UNSIGNED NOT NULL DEFAULT 1,
+                `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                CONSTRAINT `chk_authority_policy_state` CHECK (`id`=1)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[INSERT IGNORE INTO `feather_authority_policy_state` (`id`,`policy_version`) VALUES (1,1)]]
+        }
     }
 }
 

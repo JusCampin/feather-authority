@@ -49,8 +49,9 @@ function Authority.GetCapabilities()
             durableRoleCreation = 1,
             roleGrantContracts = 1,
             roleGrants = 1,
-            assignments = 0,
-            scopedEvaluation = 0,
+            assignmentContracts = 1,
+            assignments = 1,
+            scopedEvaluation = 1,
             delegations = 0
         }
     })
@@ -97,6 +98,8 @@ function Authority.ValidateConfig()
         or Config.Access.trustedRoleCreators[GetCurrentResourceName()] ~= true
         or type(Config.Access.trustedGrantors) ~= 'table'
         or Config.Access.trustedGrantors[GetCurrentResourceName()] ~= true
+        or type(Config.Access.trustedAssigners) ~= 'table'
+        or Config.Access.trustedAssigners[GetCurrentResourceName()] ~= true
         or type(Config.Capabilities) ~= 'table' or #Config.Capabilities < 1 or #Config.Capabilities > 128 then
         return Authority.Err('invalid_config', 'Authority contract, readiness, access, or capability configuration is invalid.')
     end
@@ -115,6 +118,12 @@ function Authority.ValidateConfig()
         if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean'
             or (enabled and Config.Access.trustedReaders[resource] ~= true) then
             return Authority.Err('invalid_config', 'Trusted grantor configuration is invalid.')
+        end
+    end
+    for resource, enabled in pairs(Config.Access.trustedAssigners) do
+        if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean'
+            or (enabled and Config.Access.trustedReaders[resource] ~= true) then
+            return Authority.Err('invalid_config', 'Trusted assigner configuration is invalid.')
         end
     end
     local seen = {}
