@@ -53,6 +53,7 @@ function Authority.GetCapabilities()
             assignments = 1,
             assignmentLifecycle = 1,
             scopedEvaluation = 1,
+            policyProvider = 1,
             delegations = 0
         }
     })

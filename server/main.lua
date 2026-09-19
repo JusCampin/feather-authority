@@ -30,6 +30,8 @@ CreateThread(function()
         local loaded = AuthorityCapabilities.Load()
         if not loaded.ok then return loaded end
         Authority.SetState('ready', 'ready')
+        local provider = AuthorityPolicy.Install()
+        if not provider.ok then return provider end
         print(('[feather-authority] event=startup.ready migrationsApplied=%d capabilities=%d'):format(
             migrated.value.applied, loaded.value.capabilities))
         return Authority.Ok(true)
@@ -97,6 +99,88 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
         print(('[AuthorityFoundationSmokeTest] done %d/%d passed (read-only)'):format(passed, #tests))
     end, debug.traceback)
     if not called then print('[AuthorityFoundationSmokeTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityPolicyProviderContractSmokeTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 1 and Authority.Uuid(args[1]),
+            'Use <account UUID>')
+        local named = exports['feather-core']:GetProvider('policy', 'feather-authority', 1)
+        local default = exports['feather-core']:GetProvider('policy', nil, 1)
+        local function IsCallable(value)
+            return type(value) == 'function' or (type(value) == 'table'
+                and type(rawget(value, '__cfx_functionReference')) == 'string')
+        end
+        assert(named.ok and IsCallable(named.value.implementation.Evaluate),
+            'Named Authority policy provider is unavailable')
+        local allow = named.value.implementation.Evaluate('staff.players.view', {
+            source = 1, accountId = args[1], caller = 'authority-contract-smoke', subject = {}
+        })
+        local deny = named.value.implementation.Evaluate('staff.economy.adjust', {
+            source = 1, accountId = args[1], caller = 'authority-contract-smoke', subject = {}
+        })
+        local system = named.value.implementation.Evaluate('staff.players.view', {
+            source = 0, system = true, caller = 'authority-contract-smoke', subject = {}
+        })
+        local tests = {
+            { 'named provider installed', AuthorityPolicy.IsInstalled() and named.ok
+                and named.value.provider.owner == 'feather-authority' },
+            { 'provider capabilities', named.ok
+                and named.value.provider.capabilities.accountSubjects == 1 },
+            { 'Admin remains default', default.ok and default.value.provider.owner == 'feather-admin' },
+            { 'account decision envelope', allow.ok and type(allow.value.allowed) == 'boolean'
+                and allow.value.code == 'forbidden' and allow.value.policyVersion ~= nil },
+            { 'account deny envelope', deny.ok and deny.value.allowed == false
+                and deny.value.code == 'forbidden' },
+            { 'system fails closed', system.ok and system.value.allowed == false
+                and system.value.code == 'unsupported_subject' }
+        }
+        local passed = 0
+        for _, test in ipairs(tests) do
+            if test[2] then passed = passed + 1 end
+            print(('[AuthorityPolicyProviderContractSmokeTest] %-24s %s'):format(
+                test[1], test[2] and 'PASS' or 'FAIL'))
+        end
+        print(('[AuthorityPolicyProviderContractSmokeTest] done %d/%d passed (Admin default unchanged)'):format(
+            passed, #tests))
+    end, debug.traceback)
+    if not called then print('[AuthorityPolicyProviderContractSmokeTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityPolicyProviderLiveTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 3 and Authority.Uuid(args[1])
+            and Authority.Uuid(args[2]) and type(args[3]) == 'string',
+            'Use <account UUID> <role UUID> <stable requestId>')
+        local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
+        assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
+        local issued = AuthorityAssignments.Issue({ requestId = args[3], subjectType = 'account',
+            subjectId = args[1], roleId = args[2], expectedRoleRevision = role.value.revision,
+            scopeType = 'server', reason = 'Authority provider live acceptance',
+            reasonCode = 'development.provider_test' }, GetCurrentResourceName())
+        assert(issued.ok, tostring(issued.code) .. ': ' .. tostring(issued.message))
+        local named = exports['feather-core']:GetProvider('policy', 'feather-authority', 1)
+        local default = exports['feather-core']:GetProvider('policy', nil, 1)
+        assert(named.ok and default.ok and default.value.provider.owner == 'feather-admin',
+            'Provider registry ownership changed')
+        local context = { source = 1, accountId = args[1], caller = 'authority-live-test', subject = {} }
+        local allow = named.value.implementation.Evaluate('staff.players.view', context)
+        local deny = named.value.implementation.Evaluate('staff.economy.adjust', context)
+        assert(allow.ok and allow.value.allowed and allow.value.code == 'allowed'
+            and allow.value.assignmentId == issued.value.assignmentId
+            and Authority.Uuid(allow.value.roleId) and Authority.Uuid(allow.value.grantId),
+            'Named provider did not return attributed allow')
+        assert(deny.ok and not deny.value.allowed and deny.value.code == 'forbidden',
+            'Named provider did not deny ungranted capability')
+        assert(allow.value.policyVersion == deny.value.policyVersion,
+            'Provider decisions observed inconsistent policy versions')
+        print(('[AuthorityPolicyProviderLiveTest] PASS assignment=%s account=%s allowed=true denied=true attribution=true policyVersion=%d firstReplayed=%s AdminDefaultUnchanged=true activeSessionNotRequired=true'):format(
+            issued.value.assignmentId, args[1], allow.value.policyVersion,
+            tostring(issued.value.replayed)))
+    end, debug.traceback)
+    if not called then print('[AuthorityPolicyProviderLiveTest] FAIL ' .. tostring(reason)) end
 end, true)
 
 Authority.RegisterDevCommand('AuthorityAssignmentContractSmokeTest', function(source)
@@ -403,6 +487,83 @@ Authority.RegisterDevCommand('AuthorityAssignmentExpiryTest', function(source, a
             first.value.assignmentId, validUntil, tostring(first.value.replayed), after.value.reason))
     end, debug.traceback)
     if not called then print('[AuthorityAssignmentExpiryTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentConcurrencyTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 3 and Authority.Uuid(args[1])
+            and Authority.Uuid(args[2]) and type(args[3]) == 'string',
+            'Use <account UUID> <role UUID> <stable requestId>')
+        local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
+        assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
+        local issued = AuthorityAssignments.Issue({ requestId = args[3] .. ':assignment',
+            subjectType = 'account', subjectId = args[1], roleId = args[2],
+            expectedRoleRevision = role.value.revision, scopeType = 'server',
+            reason = 'Authority concurrency acceptance', reasonCode = 'development.concurrency_test' },
+            GetCurrentResourceName())
+        assert(issued.ok, tostring(issued.code) .. ': ' .. tostring(issued.message))
+        local assignmentId = issued.value.assignmentId
+        local prior = MySQL.query.await([[SELECT `request_id`,`event_type` FROM
+            `feather_authority_assignment_events` WHERE `assignment_id`=?
+                AND `request_id` IN (?,?)]],
+            { assignmentId, args[3] .. ':suspend', args[3] .. ':revoke' }) or {}
+        local winner, loser
+        if #prior == 0 then
+            print('[AuthorityAssignmentConcurrencyTest] started assignment=' .. assignmentId)
+            local results, completed = {}, 0
+            for _, status in ipairs({ 'suspended', 'revoked' }) do
+                CreateThread(function()
+                    local result = AuthorityAssignments.ChangeStatus({ requestId = args[3] .. ':'
+                        .. (status == 'suspended' and 'suspend' or 'revoke'), assignmentId = assignmentId,
+                        expectedRevision = 1, status = status,
+                        reasonCode = 'development.concurrency_test' }, GetCurrentResourceName())
+                    results[status] = result
+                    completed = completed + 1
+                    print(('[AuthorityAssignmentConcurrencyTest] contender=%s ok=%s code=%s'):format(
+                        status, tostring(result.ok), tostring(result.code)))
+                end)
+            end
+            local deadline = GetGameTimer() + 15000
+            while completed < 2 and GetGameTimer() < deadline do Wait(25) end
+            assert(completed == 2, 'Concurrency contenders timed out')
+            for status, result in pairs(results) do
+                if result.ok then winner = status else
+                    assert(result.code == 'revision_conflict', 'Losing contender was not stale')
+                    loser = status
+                end
+            end
+            assert(winner and loser, 'Exactly one lifecycle contender must commit')
+        else
+            assert(#prior == 1, 'More than one race event committed')
+            winner = prior[1].request_id:sub(-7) == 'suspend' and 'suspended' or 'revoked'
+            loser = winner == 'suspended' and 'revoked' or 'suspended'
+        end
+        local winnerRequest = args[3] .. ':' .. (winner == 'suspended' and 'suspend' or 'revoke')
+        local winnerReplay = AuthorityAssignments.ChangeStatus({ requestId = winnerRequest,
+            assignmentId = assignmentId, expectedRevision = 1, status = winner,
+            reasonCode = 'development.concurrency_test' }, GetCurrentResourceName())
+        assert(winnerReplay.ok and winnerReplay.value.replayed, 'Winner receipt did not replay')
+        local current = AuthorityAssignments.Get({ assignmentId = assignmentId }, GetCurrentResourceName())
+        if current.ok and current.value.status == 'suspended' then
+            local cleanup = AuthorityAssignments.ChangeStatus({ requestId = args[3] .. ':cleanup',
+                assignmentId = assignmentId, expectedRevision = current.value.revision, status = 'revoked',
+                reasonCode = 'development.concurrency_cleanup' }, GetCurrentResourceName())
+            assert(cleanup.ok, 'Suspended race winner could not be revoked')
+        end
+        local final = AuthorityAssignments.Get({ assignmentId = assignmentId }, GetCurrentResourceName())
+        local decision = AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = args[1],
+            capabilityKey = 'staff.players.view', scopeType = 'server' }, GetCurrentResourceName())
+        local raceEvents = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
+            `feather_authority_assignment_events` WHERE `assignment_id`=? AND `request_id` IN (?,?)]],
+            { assignmentId, args[3] .. ':suspend', args[3] .. ':revoke' }))
+        assert(final.ok and final.value.status == 'revoked' and decision.ok
+            and decision.value.allowed == false and raceEvents == 1,
+            'Concurrent assignment outcome is inconsistent')
+        print(('[AuthorityAssignmentConcurrencyTest] PASS assignment=%s committed=1 stale=1 winner=%s loser=%s final=revoked raceEvents=1 winnerReplayed=true failClosed=true firstReplayed=%s'):format(
+            assignmentId, winner, loser, tostring(issued.value.replayed)))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentConcurrencyTest] FAIL ' .. tostring(reason)) end
 end, true)
 
 Authority.RegisterDevCommand('AuthorityRoleGrantContractSmokeTest', function(source)

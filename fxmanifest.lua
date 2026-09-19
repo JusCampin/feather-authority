@@ -18,6 +18,7 @@ server_scripts {
     'server/grants.lua',
     'server/assignments.lua',
     'server/evaluation.lua',
+    'server/policy_provider.lua',
     'server/main.lua'
 }
 
