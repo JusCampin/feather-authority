@@ -57,6 +57,31 @@ function AuthorityAssignments.ValidateLifecycle(request)
     return Ok(table.concat(fingerprint))
 end
 
+function AuthorityAssignments.ValidateReplacement(request)
+    if type(request) ~= 'table' then return Err('invalid_input', 'Assignment replacement request required.') end
+    local fields = { requestId = true, subjectType = true, subjectId = true, roleId = true,
+        expectedRoleRevision = true, scopeType = true, reason = true, reasonCode = true }
+    for field in pairs(request) do
+        if not fields[field] then return Err('invalid_input', 'Unexpected assignment replacement field.') end
+    end
+    local assigning = request.roleId ~= nil or request.expectedRoleRevision ~= nil
+    if not Token(request.requestId, 80, false) or request.subjectType ~= 'account'
+        or not Authority.Uuid(request.subjectId)
+        or (assigning and (not Authority.Uuid(request.roleId)
+            or not Authority.Integer(request.expectedRoleRevision, 1, 9007199254740991)))
+        or request.scopeType ~= 'server' or not Text(request.reason, 255)
+        or not Token(request.reasonCode, 64, true) then
+        return Err('invalid_input', 'Account, owned role revision, scope, reason, and stable request ID are required.')
+    end
+    local fingerprint = {}
+    for _, field in ipairs({ 'subjectType', 'subjectId', 'roleId', 'expectedRoleRevision',
+        'scopeType', 'reason', 'reasonCode' }) do
+        local value = request[field] == nil and '' or tostring(request[field])
+        fingerprint[#fingerprint + 1] = tostring(#value) .. ':' .. value
+    end
+    return Ok(table.concat(fingerprint))
+end
+
 local function Snapshot(row)
     if not row then return Err('assignment_not_found', 'Authority assignment was not found.') end
     local revision = tonumber(row.revision)
@@ -119,7 +144,8 @@ function AuthorityAssignments.Issue(request, resource)
             end
             if receipt.result_json then
                 local decoded, value = pcall(json.decode, receipt.result_json)
-                if not decoded or type(value) ~= 'table' or not Authority.Uuid(value.assignmentId) then
+                if not decoded or type(value) ~= 'table' or not Authority.Uuid(value.subjectId)
+                    or (value.cleared ~= true and not Authority.Uuid(value.assignmentId)) then
                     return Err('invalid_persistence', 'Stored assignment receipt is invalid.')
                 end
                 value.replayed = true
@@ -255,6 +281,137 @@ function AuthorityAssignments.ChangeStatus(request, resource)
     return result or Err('transaction_failed', 'Assignment lifecycle did not complete. Retry the same request ID.')
 end
 
+function AuthorityAssignments.ReplaceOwned(request, resource)
+    if Config.Access.trustedAssigners[resource or ''] ~= true then
+        return Err('authorization_denied', 'Calling resource is not a trusted assigner.')
+    end
+    local allowed = Authority.CheckRead(resource)
+    if not allowed.ok then return allowed end
+    local valid = AuthorityAssignments.ValidateReplacement(request)
+    if not valid.ok then return valid end
+    local identity = exports['feather-core']:GetAccountIdentity(request.subjectId)
+    if type(identity) ~= 'table' or not identity.ok or type(identity.value) ~= 'table'
+        or identity.value.accountId:lower() ~= request.subjectId:lower() then
+        return Err('subject_not_found', 'Canonical account subject was not found.')
+    end
+    if identity.value.status ~= 'active' then return Err('subject_inactive', 'Account subject is not active.') end
+    request = Authority.Copy(request)
+    local result
+    local called, committed = pcall(MySQL.startTransaction, function(query)
+        local executed, outcome = xpcall(function()
+            query([[INSERT IGNORE INTO `feather_authority_assignment_replacement_receipts`
+                (`source_resource`,`request_id`,`request_fingerprint`) VALUES (?,?,?)]],
+                { resource, request.requestId, valid.value })
+            local receipts = query([[SELECT `request_fingerprint`,`result_json` FROM
+                `feather_authority_assignment_replacement_receipts`
+                WHERE `source_resource`=? AND `request_id`=? FOR UPDATE]],
+                { resource, request.requestId }) or {}
+            local receipt = receipts[1]
+            if not receipt then return Err('internal_error', 'Replacement receipt could not be reserved.') end
+            if receipt.request_fingerprint ~= valid.value then
+                return Err('idempotency_conflict', 'Request ID is bound to a different assignment replacement.')
+            end
+            if receipt.result_json then
+                local decoded, value = pcall(json.decode, receipt.result_json)
+                if not decoded or type(value) ~= 'table' or not Authority.Uuid(value.assignmentId) then
+                    return Err('invalid_persistence', 'Stored assignment replacement receipt is invalid.')
+                end
+                value.replayed = true
+                return Ok(value)
+            end
+            local role
+            if request.roleId ~= nil then
+                local roles = query('SELECT * FROM `feather_authority_roles` WHERE `role_id`=? FOR UPDATE',
+                    { request.roleId:lower() }) or {}
+                role = roles[1]
+                if not role then return Err('role_not_found', 'Authority role was not found.') end
+                if role.status ~= 'active' or role.role_class ~= 'staff' then
+                    return Err('role_inactive', 'An active staff role is required.')
+                end
+                if role.owner_resource ~= resource then
+                    return Err('authorization_denied', 'A service may only replace assignments for roles it owns.')
+                end
+                if tonumber(role.revision) ~= request.expectedRoleRevision then
+                    return Err('revision_conflict', 'Authority role revision changed.')
+                end
+            end
+            local current = query([[SELECT a.* FROM `feather_authority_assignments` a
+                JOIN `feather_authority_roles` r ON r.`role_id`=a.`role_id`
+                WHERE a.`subject_type`='account' AND a.`subject_id`=? AND a.`scope_type`='server'
+                    AND a.`status` IN ('active','suspended') AND r.`owner_resource`=? FOR UPDATE]],
+                { request.subjectId:lower(), resource }) or {}
+            if role and #current == 1 and current[1].role_id:lower() == request.roleId:lower()
+                and current[1].status == 'active' then
+                local unchanged = Snapshot(current[1])
+                if not unchanged.ok then return unchanged end
+                unchanged.value.replaced = 0
+                unchanged.value.unchanged = true
+                unchanged.value.replayed = false
+                query([[UPDATE `feather_authority_assignment_replacement_receipts` SET `result_json`=?
+                    WHERE `source_resource`=? AND `request_id`=?]],
+                    { json.encode(unchanged.value), resource, request.requestId })
+                return unchanged
+            end
+            for index, row in ipairs(current) do
+                query([[UPDATE `feather_authority_assignments` SET `status`='revoked',
+                    `revision`=`revision`+1,`revoked_at`=CURRENT_TIMESTAMP WHERE `assignment_id`=?]],
+                    { row.assignment_id })
+                local ids = query('SELECT UUID() AS `event_id`') or {}
+                query([[INSERT INTO `feather_authority_assignment_events`
+                    (`event_id`,`assignment_id`,`event_type`,`source_resource`,`request_id`,`reason_code`,`revision`)
+                    VALUES (?,?, 'authority.assignment.revoked',?,?,?,?)]],
+                    { ids[1].event_id, row.assignment_id, resource,
+                        request.requestId .. ':revoke:' .. tostring(index), request.reasonCode,
+                        tonumber(row.revision) + 1 })
+            end
+            if not role then
+                local cleared = { subjectId = request.subjectId:lower(), cleared = true,
+                    replaced = #current, unchanged = #current == 0, replayed = false }
+                query([[UPDATE `feather_authority_assignment_replacement_receipts` SET `result_json`=?
+                    WHERE `source_resource`=? AND `request_id`=?]],
+                    { json.encode(cleared), resource, request.requestId })
+                if #current > 0 then
+                    query('UPDATE `feather_authority_policy_state` SET `policy_version`=`policy_version`+1 WHERE `id`=1')
+                end
+                return Ok(cleared)
+            end
+            local ids = query('SELECT UUID() AS `assignment_id`,UUID() AS `event_id`') or {}
+            local assignmentId = ids[1] and ids[1].assignment_id
+            if not Authority.Uuid(assignmentId) then
+                return Err('internal_error', 'Could not generate replacement assignment identity.')
+            end
+            query([[INSERT INTO `feather_authority_assignments`
+                (`assignment_id`,`subject_type`,`subject_id`,`role_id`,`issuer_type`,`issuer_id`,
+                    `scope_type`,`reason`) VALUES (?,'account',?,?,'service_principal',?,'server',?)]],
+                { assignmentId, request.subjectId:lower(), request.roleId:lower(), resource, request.reason })
+            local createdRows = query('SELECT * FROM `feather_authority_assignments` WHERE `assignment_id`=?',
+                { assignmentId }) or {}
+            local created = Snapshot(createdRows[1])
+            if not created.ok then return created end
+            created.value.roleRevision = request.expectedRoleRevision
+            created.value.replaced = #current
+            created.value.unchanged = false
+            created.value.replayed = false
+            query([[INSERT INTO `feather_authority_assignment_events`
+                (`event_id`,`assignment_id`,`event_type`,`source_resource`,`request_id`,`reason_code`,`revision`)
+                VALUES (?,?, 'authority.assignment.issued',?,?,?,1)]],
+                { ids[1].event_id, assignmentId, resource, request.requestId .. ':issue', request.reasonCode })
+            query([[UPDATE `feather_authority_assignment_replacement_receipts` SET `result_json`=?
+                WHERE `source_resource`=? AND `request_id`=?]],
+                { json.encode(created.value), resource, request.requestId })
+            query('UPDATE `feather_authority_policy_state` SET `policy_version`=`policy_version`+1 WHERE `id`=1')
+            return created
+        end, debug.traceback)
+        if not executed then result = Err('internal_error', 'Assignment replacement transaction failed.'); return false end
+        result = outcome
+        return outcome.ok == true
+    end)
+    if not called or (result and result.ok and committed ~= true) then
+        return Err('transaction_failed', 'Assignment replacement did not confirm commit. Retry the same request ID.')
+    end
+    return result or Err('transaction_failed', 'Assignment replacement did not complete. Retry the same request ID.')
+end
+
 exports('IssueAssignment', function(request)
     local called, result = xpcall(function()
         return AuthorityAssignments.Issue(request, GetInvokingResource())
@@ -270,5 +427,12 @@ exports('ChangeAssignmentStatus', function(request)
         return AuthorityAssignments.ChangeStatus(request, GetInvokingResource())
     end, debug.traceback)
     if not called then return Err('internal_error', 'Authority assignment lifecycle operation failed.') end
+    return result
+end)
+exports('ReplaceOwnedStaffAssignment', function(request)
+    local called, result = xpcall(function()
+        return AuthorityAssignments.ReplaceOwned(request, GetInvokingResource())
+    end, debug.traceback)
+    if not called then return Err('internal_error', 'Assignment replacement operation failed.') end
     return result
 end)

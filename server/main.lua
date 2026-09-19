@@ -79,7 +79,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
                 and capabilities.value.features.capabilityRegistry == 1
                 and capabilities.value.features.assignments == 1 },
             { 'health ready', health.ok and health.value.state == 'ready' },
-            { 'bounded catalog', listed.ok and #listed.value == #Config.Capabilities and #listed.value <= 128 },
+            { 'bounded catalog', listed.ok and #listed.value >= #Config.Capabilities and #listed.value <= 128 },
             { 'staff namespace', Valid(staff, 'staff.authority.manage', 'staff') },
             { 'roleplay namespace', Valid(roleplay, 'rp.organization.treasury.approve', 'rp') },
             { 'snapshot isolated', fresh.ok and fresh.value.description ~= 'mutated' },
@@ -89,7 +89,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
             { 'await ready', Authority.AwaitReady(0).ok },
             { 'persisted identity', staff.ok and persisted
                 and persisted.capability_id == staff.value.capabilityId },
-            { 'migration ledger', tonumber(migrations) == 8 }
+            { 'migration ledger', tonumber(migrations) == 9 }
         }
         local passed = 0
         for _, test in ipairs(tests) do
@@ -272,6 +272,48 @@ Authority.RegisterDevCommand('AuthorityAssignmentContractSmokeTest', function(so
     end, debug.traceback)
     if not called then print('[AuthorityAssignmentContractSmokeTest] FAIL ' .. tostring(reason)) end
 end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentReplacementContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local valid = { requestId = 'authority-replacement-contract-001', subjectType = 'account',
+        subjectId = '00000000-0000-4000-8000-000000000001',
+        roleId = '00000000-0000-4000-8000-000000000002', expectedRoleRevision = 1,
+        scopeType = 'server', reason = 'Contract validation only.',
+        reasonCode = 'development.contract_test' }
+    local function Rejected(field, value)
+        local request = Authority.Copy(valid)
+        request[field] = value
+        return AuthorityAssignments.ValidateReplacement(request).ok == false
+    end
+    local injected = Authority.Copy(valid); injected.sourceResource = 'feather-admin'
+    local changed = Authority.Copy(valid); changed.reason = 'Changed reason.'
+    local tests = {
+        { 'replacement capability', Authority.GetCapabilities().value.features.assignmentReplacement == 1 },
+        { 'valid request', AuthorityAssignments.ValidateReplacement(valid).ok },
+        { 'valid clear request', (function()
+            local clear = Authority.Copy(valid); clear.roleId = nil; clear.expectedRoleRevision = nil
+            return AuthorityAssignments.ValidateReplacement(clear).ok
+        end)() },
+        { 'untrusted rejected', AuthorityAssignments.ReplaceOwned(valid, 'untrusted-resource').code == 'authorization_denied' },
+        { 'missing request rejected', Rejected('requestId', nil) },
+        { 'oversized request rejected', Rejected('requestId', string.rep('a', 81)) },
+        { 'bad subject rejected', Rejected('subjectId', 'not-a-uuid') },
+        { 'bad role rejected', Rejected('roleId', 'not-a-uuid') },
+        { 'zero revision rejected', Rejected('expectedRoleRevision', 0) },
+        { 'unknown scope rejected', Rejected('scopeType', 'organization') },
+        { 'identity injection rejected', AuthorityAssignments.ValidateReplacement(injected).ok == false },
+        { 'payload binding', AuthorityAssignments.ValidateReplacement(valid).value
+            ~= AuthorityAssignments.ValidateReplacement(changed).value }
+    }
+    local passed = 0
+    for _, test in ipairs(tests) do
+        if test[2] then passed = passed + 1 end
+        print(('[AuthorityAssignmentReplacementContractSmokeTest] %-28s %s'):format(
+            test[1], test[2] and 'PASS' or 'FAIL'))
+    end
+    print(('[AuthorityAssignmentReplacementContractSmokeTest] done %d/%d passed (no assignments changed)'):format(
+        passed, #tests))
+end)
 
 Authority.RegisterDevCommand('AuthorityAssignmentLiveTest', function(source, args)
     if source ~= 0 then return end

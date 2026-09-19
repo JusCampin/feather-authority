@@ -54,6 +54,7 @@ function Authority.GetCapabilities()
             assignmentContracts = 1,
             assignments = 1,
             assignmentLifecycle = 1,
+            assignmentReplacement = 1,
             scopedEvaluation = 1,
             effectiveCapabilityReads = 1,
             policyProvider = 1,
