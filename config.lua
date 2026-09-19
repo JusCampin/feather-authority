@@ -8,6 +8,14 @@ Config = {
         trustedReaders = {
             ['feather-authority'] = true,
             ['feather-admin'] = true
+        },
+        trustedRoleCreators = {
+            ['feather-authority'] = true,
+            ['feather-admin'] = true
+        },
+        trustedGrantors = {
+            ['feather-authority'] = true,
+            ['feather-admin'] = true
         }
     },
     Capabilities = {

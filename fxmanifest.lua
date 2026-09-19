@@ -14,6 +14,8 @@ server_scripts {
     'server/foundation.lua',
     'server/migrations.lua',
     'server/capabilities.lua',
+    'server/roles.lua',
+    'server/grants.lua',
     'server/main.lua'
 }
 

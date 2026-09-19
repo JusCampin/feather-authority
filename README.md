@@ -6,8 +6,9 @@ Core remains the authenticated policy-evaluation boundary, while every domain
 continues to authorize its own protected mutations.
 
 The current development foundation provides Contract 1 lifecycle/readiness,
-checksum-protected migrations, and a bounded capability registry. It does not
-yet issue roles or assignments and therefore grants no permissions.
+checksum-protected migrations, a bounded capability registry, and durable,
+idempotent role identity. It does not yet grant capabilities or issue assignments
+and therefore grants no permissions.
 
 ## Startup order
 

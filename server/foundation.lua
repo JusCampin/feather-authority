@@ -45,7 +45,10 @@ function Authority.GetCapabilities()
             health = 1,
             migrations = 1,
             capabilityRegistry = 1,
-            roles = 0,
+            roles = 1,
+            durableRoleCreation = 1,
+            roleGrantContracts = 1,
+            roleGrants = 1,
             assignments = 0,
             scopedEvaluation = 0,
             delegations = 0
@@ -90,12 +93,28 @@ function Authority.ValidateConfig()
         or type(Config.DevMode) ~= 'boolean' or type(Config.Access) ~= 'table'
         or type(Config.Access.trustedReaders) ~= 'table'
         or Config.Access.trustedReaders[GetCurrentResourceName()] ~= true
+        or type(Config.Access.trustedRoleCreators) ~= 'table'
+        or Config.Access.trustedRoleCreators[GetCurrentResourceName()] ~= true
+        or type(Config.Access.trustedGrantors) ~= 'table'
+        or Config.Access.trustedGrantors[GetCurrentResourceName()] ~= true
         or type(Config.Capabilities) ~= 'table' or #Config.Capabilities < 1 or #Config.Capabilities > 128 then
         return Authority.Err('invalid_config', 'Authority contract, readiness, access, or capability configuration is invalid.')
     end
     for resource, enabled in pairs(Config.Access.trustedReaders) do
         if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean' then
             return Authority.Err('invalid_config', 'Trusted reader configuration is invalid.')
+        end
+    end
+    for resource, enabled in pairs(Config.Access.trustedRoleCreators) do
+        if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean'
+            or (enabled and Config.Access.trustedReaders[resource] ~= true) then
+            return Authority.Err('invalid_config', 'Trusted role creator configuration is invalid.')
+        end
+    end
+    for resource, enabled in pairs(Config.Access.trustedGrantors) do
+        if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean'
+            or (enabled and Config.Access.trustedReaders[resource] ~= true) then
+            return Authority.Err('invalid_config', 'Trusted grantor configuration is invalid.')
         end
     end
     local seen = {}

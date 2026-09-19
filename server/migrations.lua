@@ -21,6 +21,81 @@ local definitions = {
                     CHECK (`status` IN ('active','retired'))
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
         }
+    },
+    {
+        id = '002_role_identity',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_roles` (
+                `role_id` CHAR(36) NOT NULL,
+                `role_key` VARCHAR(100) NOT NULL,
+                `label` VARCHAR(100) NOT NULL,
+                `role_class` VARCHAR(16) NOT NULL,
+                `owner_resource` VARCHAR(100) NOT NULL,
+                `status` VARCHAR(16) NOT NULL DEFAULT 'active',
+                `revision` BIGINT UNSIGNED NOT NULL DEFAULT 1,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `retired_at` TIMESTAMP NULL,
+                PRIMARY KEY (`role_id`),
+                UNIQUE KEY `uq_authority_role_key` (`role_key`),
+                CONSTRAINT `chk_authority_role_class` CHECK (`role_class` IN ('staff','rp')),
+                CONSTRAINT `chk_authority_role_status` CHECK (`status` IN ('active','retired'))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_role_creation_receipts` (
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `request_fingerprint` LONGTEXT NOT NULL,
+                `result_json` LONGTEXT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`source_resource`,`request_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_role_events` (
+                `event_id` CHAR(36) NOT NULL,
+                `role_id` CHAR(36) NOT NULL,
+                `event_type` VARCHAR(64) NOT NULL,
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `reason_code` VARCHAR(64) NOT NULL,
+                `revision` BIGINT UNSIGNED NOT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`event_id`),
+                UNIQUE KEY `uq_authority_role_event_request` (`source_resource`,`request_id`),
+                CONSTRAINT `fk_authority_role_event` FOREIGN KEY (`role_id`)
+                    REFERENCES `feather_authority_roles` (`role_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
+    },
+    {
+        id = '003_role_grants',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_role_grants` (
+                `grant_id` CHAR(36) NOT NULL,
+                `role_id` CHAR(36) NOT NULL,
+                `capability_id` CHAR(36) NOT NULL,
+                `effect` VARCHAR(8) NOT NULL DEFAULT 'allow',
+                `scope_type` VARCHAR(24) NOT NULL,
+                `status` VARCHAR(16) NOT NULL DEFAULT 'active',
+                `revision` BIGINT UNSIGNED NOT NULL DEFAULT 1,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `revoked_at` TIMESTAMP NULL,
+                PRIMARY KEY (`grant_id`),
+                UNIQUE KEY `uq_authority_role_grant` (`role_id`,`capability_id`,`scope_type`),
+                CONSTRAINT `fk_authority_grant_role` FOREIGN KEY (`role_id`)
+                    REFERENCES `feather_authority_roles` (`role_id`),
+                CONSTRAINT `fk_authority_grant_capability` FOREIGN KEY (`capability_id`)
+                    REFERENCES `feather_authority_capabilities` (`capability_id`),
+                CONSTRAINT `chk_authority_grant_effect` CHECK (`effect`='allow'),
+                CONSTRAINT `chk_authority_grant_scope` CHECK (`scope_type` IN ('server','organization')),
+                CONSTRAINT `chk_authority_grant_status` CHECK (`status` IN ('active','revoked'))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_role_grant_receipts` (
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `request_fingerprint` LONGTEXT NOT NULL,
+                `result_json` LONGTEXT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`source_resource`,`request_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
     }
 }
 
