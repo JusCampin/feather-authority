@@ -54,10 +54,55 @@ function AuthorityEvaluation.Evaluate(request, resource)
         row.assignment_id, row.role_id, row.grant_id)
 end
 
+function AuthorityEvaluation.ListEffective(request, resource)
+    local allowed = Authority.CheckRead(resource)
+    if not allowed.ok then return allowed end
+    if type(request) ~= 'table' or request.subjectType ~= 'account'
+        or not Authority.Uuid(request.subjectId) or request.scopeType ~= 'server' then
+        return Err('invalid_input', 'Account subject and server scope are required.')
+    end
+    for field in pairs(request) do
+        if field ~= 'subjectType' and field ~= 'subjectId' and field ~= 'scopeType' then
+            return Err('invalid_input', 'Unexpected effective-capability field.')
+        end
+    end
+    local policyVersion = tonumber(MySQL.scalar.await(
+        'SELECT `policy_version` FROM `feather_authority_policy_state` WHERE `id`=1'))
+    if not Authority.Integer(policyVersion, 1, 9007199254740991) then
+        return Err('invalid_persistence', 'Authority policy version is invalid.')
+    end
+    local rows = MySQL.query.await([[SELECT DISTINCT c.`capability_key`
+        FROM `feather_authority_assignments` a
+        JOIN `feather_authority_roles` r ON r.`role_id`=a.`role_id` AND r.`status`='active'
+        JOIN `feather_authority_role_grants` g ON g.`role_id`=r.`role_id`
+            AND g.`effect`='allow' AND g.`scope_type`='server' AND g.`status`='active'
+        JOIN `feather_authority_capabilities` c ON c.`capability_id`=g.`capability_id`
+            AND c.`status`='active'
+        WHERE a.`subject_type`='account' AND a.`subject_id`=? AND a.`scope_type`='server'
+            AND a.`status`='active' AND (a.`valid_until` IS NULL OR a.`valid_until`>CURRENT_TIMESTAMP)
+        ORDER BY c.`capability_key` LIMIT 129]], { request.subjectId:lower() }) or {}
+    if #rows > 128 then return Err('capability_catalog_limit', 'Effective capability result exceeds 128.') end
+    local capabilities = {}
+    for _, row in ipairs(rows) do
+        if not CapabilityKey(row.capability_key) then
+            return Err('invalid_persistence', 'Effective capability key is invalid.')
+        end
+        capabilities[#capabilities + 1] = row.capability_key
+    end
+    return Ok({ capabilities = capabilities, policyVersion = policyVersion })
+end
+
 exports('Evaluate', function(request)
     local called, result = xpcall(function()
         return AuthorityEvaluation.Evaluate(request, GetInvokingResource())
     end, debug.traceback)
     if not called then return Err('internal_error', 'Authority evaluation failed.') end
+    return result
+end)
+exports('ListEffectiveCapabilities', function(request)
+    local called, result = xpcall(function()
+        return AuthorityEvaluation.ListEffective(request, GetInvokingResource())
+    end, debug.traceback)
+    if not called then return Err('internal_error', 'Effective capability read failed.') end
     return result
 end)
