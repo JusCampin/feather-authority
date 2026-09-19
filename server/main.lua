@@ -87,7 +87,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
             { 'await ready', Authority.AwaitReady(0).ok },
             { 'persisted identity', staff.ok and persisted
                 and persisted.capability_id == staff.value.capabilityId },
-            { 'migration ledger', tonumber(migrations) == 6 }
+            { 'migration ledger', tonumber(migrations) == 7 }
         }
         local passed = 0
         for _, test in ipairs(tests) do
@@ -273,6 +273,136 @@ Authority.RegisterDevCommand('AuthorityEvaluationLiveTest', function(source, arg
             args[1], allow.value.reason, deny.value.reason, allow.value.policyVersion))
     end, debug.traceback)
     if not called then print('[AuthorityEvaluationLiveTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentLifecycleContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local valid = { requestId = 'authority-lifecycle-contract-001',
+        assignmentId = '00000000-0000-4000-8000-000000000001', expectedRevision = 1,
+        status = 'suspended', reasonCode = 'development.contract' }
+    local first = AuthorityAssignments.ValidateLifecycle(valid)
+    local same = AuthorityAssignments.ValidateLifecycle(Authority.Copy(valid))
+    local changed = Authority.Copy(valid); changed.status = 'revoked'
+    local changedResult = AuthorityAssignments.ValidateLifecycle(changed)
+    local function Rejected(field, value)
+        local request = Authority.Copy(valid); request[field] = value
+        return not AuthorityAssignments.ValidateLifecycle(request).ok
+    end
+    local injected = Authority.Copy(valid); injected.subjectId = valid.assignmentId
+    local denied = AuthorityAssignments.ChangeStatus(valid, 'untrusted-smoke-caller')
+    local tests = {
+        { 'lifecycle capability', Authority.GetCapabilities().value.features.assignmentLifecycle == 1 },
+        { 'valid suspend', first.ok },
+        { 'stable fingerprint', same.ok and same.value == first.value },
+        { 'payload binding', changedResult.ok and changedResult.value ~= first.value },
+        { 'untrusted rejected', not denied.ok and denied.code == 'authorization_denied' },
+        { 'bad assignment rejected', Rejected('assignmentId', 'not-a-uuid') },
+        { 'zero revision rejected', Rejected('expectedRevision', 0) },
+        { 'fractional revision rejected', Rejected('expectedRevision', 1.5) },
+        { 'unknown status rejected', Rejected('status', 'expired') },
+        { 'missing request rejected', Rejected('requestId', nil) },
+        { 'bad reason rejected', Rejected('reasonCode', 'Bad Reason') },
+        { 'identity injection rejected', not AuthorityAssignments.ValidateLifecycle(injected).ok }
+    }
+    local passed = 0
+    for _, test in ipairs(tests) do
+        if test[2] then passed = passed + 1 end
+        print(('[AuthorityAssignmentLifecycleContractSmokeTest] %-28s %s'):format(
+            test[1], test[2] and 'PASS' or 'FAIL'))
+    end
+    print(('[AuthorityAssignmentLifecycleContractSmokeTest] done %d/%d passed (no status changes)'):format(
+        passed, #tests))
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentLifecycleLiveTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 2 and Authority.Uuid(args[1])
+            and type(args[2]) == 'string', 'Use <assignment UUID> <stable requestId>')
+        local assignment = AuthorityAssignments.Get({ assignmentId = args[1] }, GetCurrentResourceName())
+        assert(assignment.ok, tostring(assignment.code) .. ': ' .. tostring(assignment.message))
+        local historical = assignment.value.status == 'revoked'
+        local accountId = assignment.value.subjectId
+        local function Evaluate()
+            return AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = accountId,
+                capabilityKey = 'staff.players.view', scopeType = 'server' }, GetCurrentResourceName())
+        end
+        local steps = {
+            { suffix = ':suspend', revision = 1, status = 'suspended' },
+            { suffix = ':resume', revision = 2, status = 'active' },
+            { suffix = ':revoke', revision = 3, status = 'revoked' }
+        }
+        local replayed = true
+        for index, step in ipairs(steps) do
+            local result = AuthorityAssignments.ChangeStatus({ requestId = args[2] .. step.suffix,
+                assignmentId = args[1], expectedRevision = step.revision, status = step.status,
+                reasonCode = 'development.lifecycle_test' }, GetCurrentResourceName())
+            assert(result.ok, tostring(result.code) .. ': ' .. tostring(result.message))
+            replayed = replayed and result.value.replayed == true
+            if not historical then
+                local decision = Evaluate()
+                local expectedAllow = index == 2
+                assert(decision.ok and decision.value.allowed == expectedAllow,
+                    'Evaluation did not reflect assignment status ' .. step.status)
+            end
+        end
+        local terminal = AuthorityAssignments.ChangeStatus({ requestId = args[2] .. ':terminal',
+            assignmentId = args[1], expectedRevision = 4, status = 'active',
+            reasonCode = 'development.lifecycle_test' }, GetCurrentResourceName())
+        assert(not terminal.ok and terminal.code == 'assignment_terminal', 'Revoked assignment was resumed')
+        local final = AuthorityAssignments.Get({ assignmentId = args[1] }, GetCurrentResourceName())
+        local finalDecision = Evaluate()
+        local events = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
+            `feather_authority_assignment_events` WHERE `assignment_id`=?]], { args[1] }))
+        assert(final.ok and final.value.status == 'revoked' and final.value.revision == 4 and events == 4
+            and finalDecision.ok and finalDecision.value.allowed == false,
+            'Final assignment lifecycle evidence is inconsistent')
+        print(('[AuthorityAssignmentLifecycleLiveTest] PASS assignment=%s state=revoked revision=4 allReplayed=%s suspendDenied=true resumeAllowed=true revokeDenied=true terminalBlocked=true events=4'):format(
+            args[1], tostring(replayed)))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentLifecycleLiveTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityAssignmentExpiryTest', function(source, args)
+    if source ~= 0 then return end
+    local called, reason = xpcall(function()
+        assert(type(args) == 'table' and #args == 3 and Authority.Uuid(args[1])
+            and Authority.Uuid(args[2]) and type(args[3]) == 'string',
+            'Use <account UUID> <role UUID> <stable requestId>')
+        local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
+        assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
+        local receipt = MySQL.single.await([[SELECT `result_json` FROM `feather_authority_assignment_receipts`
+            WHERE `source_resource`=? AND `request_id`=?]], { GetCurrentResourceName(), args[3] })
+        local priorId
+        if receipt and receipt.result_json then
+            local decoded, value = pcall(json.decode, receipt.result_json)
+            if decoded and type(value) == 'table' then priorId = value.assignmentId end
+        end
+        local validUntil = priorId and tonumber(MySQL.scalar.await([[SELECT UNIX_TIMESTAMP(`valid_until`)
+            FROM `feather_authority_assignments` WHERE `assignment_id`=?]], { priorId })) or os.time() + 3
+        local request = { requestId = args[3], subjectType = 'account', subjectId = args[1],
+            roleId = args[2], expectedRoleRevision = role.value.revision, scopeType = 'server',
+            validUntil = validUntil, reason = 'Authority expiry acceptance',
+            reasonCode = 'development.expiry_test' }
+        local first = AuthorityAssignments.Issue(request, GetCurrentResourceName())
+        assert(first.ok, tostring(first.code) .. ': ' .. tostring(first.message))
+        if first.value.replayed ~= true then
+            local before = AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = args[1],
+                capabilityKey = 'staff.players.view', scopeType = 'server' }, GetCurrentResourceName())
+            assert(before.ok and before.value.allowed, 'Fresh assignment did not authorize before expiry')
+            Wait(4000)
+        end
+        local after = AuthorityEvaluation.Evaluate({ subjectType = 'account', subjectId = args[1],
+            capabilityKey = 'staff.players.view', scopeType = 'server' }, GetCurrentResourceName())
+        local replay = AuthorityAssignments.Issue(request, GetCurrentResourceName())
+        assert(after.ok and not after.value.allowed and after.value.reason == 'no_active_assignment',
+            'Expired assignment continued authorizing')
+        assert(replay.ok and replay.value.replayed and replay.value.assignmentId == first.value.assignmentId,
+            'Expired assignment receipt did not replay')
+        print(('[AuthorityAssignmentExpiryTest] PASS assignment=%s validUntil=%d firstReplayed=%s allowedBefore=true deniedAfter=true reason=%s replayed=true stableIdentity=true'):format(
+            first.value.assignmentId, validUntil, tostring(first.value.replayed), after.value.reason))
+    end, debug.traceback)
+    if not called then print('[AuthorityAssignmentExpiryTest] FAIL ' .. tostring(reason)) end
 end, true)
 
 Authority.RegisterDevCommand('AuthorityRoleGrantContractSmokeTest', function(source)

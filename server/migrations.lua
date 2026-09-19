@@ -166,6 +166,19 @@ local definitions = {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
             [[INSERT IGNORE INTO `feather_authority_policy_state` (`id`,`policy_version`) VALUES (1,1)]]
         }
+    },
+    {
+        id = '007_assignment_lifecycle',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_assignment_lifecycle_receipts` (
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `request_fingerprint` LONGTEXT NOT NULL,
+                `result_json` LONGTEXT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`source_resource`,`request_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
     }
 }
 
