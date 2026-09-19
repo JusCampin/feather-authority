@@ -9,6 +9,10 @@ Config = {
             ['feather-authority'] = true,
             ['feather-admin'] = true
         },
+        trustedCapabilityRegistrars = {
+            ['feather-authority'] = true,
+            ['feather-admin'] = true
+        },
         trustedRoleCreators = {
             ['feather-authority'] = true,
             ['feather-admin'] = true

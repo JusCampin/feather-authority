@@ -1,6 +1,148 @@
 AuthorityCapabilities = {}
 local catalog = {}
 
+local function CapabilityKey(value)
+    return type(value) == 'string' and #value >= 3 and #value <= 100
+        and value:match('^[a-z][a-z0-9_]*%.[a-z][a-z0-9_.]*$') ~= nil
+        and value:sub(-1) ~= '.' and not value:find('..', 1, true)
+end
+local function Text(value, maximum)
+    return type(value) == 'string' and #value > 0 and #value <= maximum
+        and not value:find('%c') and value:find('%S') ~= nil
+end
+
+function AuthorityCapabilities.ValidateRegistration(request)
+    if type(request) ~= 'table' then return Authority.Err('invalid_input', 'Capability registration required.') end
+    local fields = { requestId = true, capabilities = true }
+    for field in pairs(request) do
+        if not fields[field] then return Authority.Err('invalid_input', 'Unexpected registration field.') end
+    end
+    if type(request.requestId) ~= 'string' or #request.requestId < 1 or #request.requestId > 128
+        or not request.requestId:match('^[A-Za-z0-9][A-Za-z0-9._:%-]*$')
+        or type(request.capabilities) ~= 'table' or #request.capabilities < 1
+        or #request.capabilities > 100 then
+        return Authority.Err('invalid_input', 'Stable request ID and 1-100 capability definitions required.')
+    end
+    local seen, fingerprint = {}, {}
+    for _, definition in ipairs(request.capabilities) do
+        if type(definition) ~= 'table' then return Authority.Err('invalid_input', 'Capability definition required.') end
+        for field in pairs(definition) do
+            if field ~= 'key' and field ~= 'description' and field ~= 'riskClass' then
+                return Authority.Err('invalid_input', 'Unexpected capability definition field.')
+            end
+        end
+        if not CapabilityKey(definition.key) or seen[definition.key]
+            or not Text(definition.description, 255)
+            or (definition.riskClass ~= 'low' and definition.riskClass ~= 'moderate'
+                and definition.riskClass ~= 'high' and definition.riskClass ~= 'critical') then
+            return Authority.Err('invalid_input', 'Capability definitions must be bounded, valid, and unique.')
+        end
+        seen[definition.key] = true
+        fingerprint[#fingerprint + 1] = definition.key .. '\0' .. definition.description
+            .. '\0' .. definition.riskClass
+    end
+    table.sort(fingerprint)
+    return Authority.Ok(table.concat(fingerprint, '\1'))
+end
+
+function AuthorityCapabilities.Register(request, resource)
+    if Config.Access.trustedCapabilityRegistrars[resource or ''] ~= true then
+        return Authority.Err('authorization_denied', 'Calling resource is not a trusted capability registrar.')
+    end
+    local allowed = Authority.CheckRead(resource)
+    if not allowed.ok then return allowed end
+    local valid = AuthorityCapabilities.ValidateRegistration(request)
+    if not valid.ok then return valid end
+    request = Authority.Copy(request)
+    table.sort(request.capabilities, function(left, right) return left.key < right.key end)
+    local result
+    local called, committed = pcall(MySQL.startTransaction, function(query)
+        local executed, outcome = xpcall(function()
+            query([[INSERT IGNORE INTO `feather_authority_capability_registration_receipts`
+                (`source_resource`,`request_id`,`request_fingerprint`) VALUES (?,?,?)]],
+                { resource, request.requestId, valid.value })
+            local receipts = query([[SELECT `request_fingerprint`,`result_json` FROM
+                `feather_authority_capability_registration_receipts`
+                WHERE `source_resource`=? AND `request_id`=? FOR UPDATE]],
+                { resource, request.requestId }) or {}
+            local receipt = receipts[1]
+            if not receipt then return Authority.Err('internal_error', 'Registration receipt could not be reserved.') end
+            if receipt.request_fingerprint ~= valid.value then
+                return Authority.Err('idempotency_conflict',
+                    'Request ID is bound to a different capability catalog.')
+            end
+            if receipt.result_json then
+                local decoded, value = pcall(json.decode, receipt.result_json)
+                if not decoded or type(value) ~= 'table' or type(value.capabilities) ~= 'table' then
+                    return Authority.Err('invalid_persistence', 'Stored registration receipt is invalid.')
+                end
+                value.replayed = true
+                return Authority.Ok(value)
+            end
+            local total = tonumber((query('SELECT COUNT(*) AS `count` FROM `feather_authority_capabilities`') or {})[1].count)
+            local registered, updated, unchanged, identities = 0, 0, 0, {}
+            for _, definition in ipairs(request.capabilities) do
+                local rows = query([[SELECT * FROM `feather_authority_capabilities`
+                    WHERE `capability_key`=? FOR UPDATE]], { definition.key }) or {}
+                local row = rows[1]
+                if row and row.owner_resource ~= resource then
+                    return Authority.Err('capability_owner_conflict',
+                        'Capability belongs to another resource.', { capabilityKey = definition.key })
+                end
+                local changed = row and (row.description ~= definition.description
+                    or row.risk_class ~= definition.riskClass)
+                local capabilityId = row and row.capability_id or nil
+                if not row then
+                    if total + registered >= 128 then
+                        return Authority.Err('capability_catalog_limit', 'Capability catalog limit would be exceeded.')
+                    end
+                    local ids = query('SELECT UUID() AS `capability_id`') or {}
+                    capabilityId = ids[1] and ids[1].capability_id
+                    query([[INSERT INTO `feather_authority_capabilities`
+                        (`capability_id`,`capability_key`,`description`,`risk_class`,`owner_resource`)
+                        VALUES (?,?,?,?,?)]], { capabilityId, definition.key, definition.description,
+                        definition.riskClass, resource })
+                    registered = registered + 1
+                elseif changed then
+                    query([[UPDATE `feather_authority_capabilities` SET `description`=?,`risk_class`=?,
+                        `revision`=`revision`+1 WHERE `capability_id`=?]],
+                        { definition.description, definition.riskClass, capabilityId })
+                    updated = updated + 1
+                else unchanged = unchanged + 1 end
+                identities[#identities + 1] = { key = definition.key, capabilityId = capabilityId }
+                if not row or changed then
+                    local event = (query('SELECT UUID() AS `event_id`') or {})[1]
+                    query([[INSERT INTO `feather_authority_capability_events`
+                        (`event_id`,`capability_id`,`event_type`,`source_resource`,`request_id`)
+                        VALUES (?,?,?, ?,?)]], { event.event_id, capabilityId,
+                        row and 'authority.capability.updated' or 'authority.capability.registered',
+                        resource, request.requestId })
+                end
+            end
+            local value = { registered = registered, updated = updated, unchanged = unchanged,
+                capabilities = identities, replayed = false }
+            query([[UPDATE `feather_authority_capability_registration_receipts` SET `result_json`=?
+                WHERE `source_resource`=? AND `request_id`=?]],
+                { json.encode(value), resource, request.requestId })
+            if registered + updated > 0 then
+                query('UPDATE `feather_authority_policy_state` SET `policy_version`=`policy_version`+1 WHERE `id`=1')
+            end
+            return Authority.Ok(value)
+        end, debug.traceback)
+        if not executed then result = Authority.Err('internal_error', 'Capability registration failed.'); return false end
+        result = outcome
+        return outcome.ok == true
+    end)
+    if not called or (result and result.ok and committed ~= true) then
+        return Authority.Err('transaction_failed', 'Registration did not confirm commit. Retry the same request ID.')
+    end
+    if result and result.ok then
+        local loaded = AuthorityCapabilities.Load()
+        if not loaded.ok then return loaded end
+    end
+    return result or Authority.Err('transaction_failed', 'Registration did not complete. Retry the same request ID.')
+end
+
 function AuthorityCapabilities.Load()
     for _, definition in ipairs(Config.Capabilities) do
         local existing = MySQL.single.await(
@@ -74,4 +216,11 @@ exports('GetCapability', function(key)
 end)
 exports('ListCapabilities', function()
     return AuthorityCapabilities.List(GetInvokingResource())
+end)
+exports('RegisterCapabilities', function(request)
+    local called, result = xpcall(function()
+        return AuthorityCapabilities.Register(request, GetInvokingResource())
+    end, debug.traceback)
+    if not called then return Authority.Err('internal_error', 'Capability registration operation failed.') end
+    return result
 end)

@@ -179,6 +179,32 @@ local definitions = {
                 PRIMARY KEY (`source_resource`,`request_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
         }
+    },
+    {
+        id = '008_capability_registration',
+        statements = {
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_capability_registration_receipts` (
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `request_fingerprint` LONGTEXT NOT NULL,
+                `result_json` LONGTEXT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`source_resource`,`request_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]],
+            [[CREATE TABLE IF NOT EXISTS `feather_authority_capability_events` (
+                `event_id` CHAR(36) NOT NULL,
+                `capability_id` CHAR(36) NOT NULL,
+                `event_type` VARCHAR(64) NOT NULL,
+                `source_resource` VARCHAR(100) NOT NULL,
+                `request_id` VARCHAR(128) NOT NULL,
+                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`event_id`),
+                UNIQUE KEY `uq_authority_capability_event_request`
+                    (`capability_id`,`source_resource`,`request_id`),
+                CONSTRAINT `fk_authority_capability_event` FOREIGN KEY (`capability_id`)
+                    REFERENCES `feather_authority_capabilities` (`capability_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+        }
     }
 }
 

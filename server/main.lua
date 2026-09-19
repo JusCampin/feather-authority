@@ -89,7 +89,7 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
             { 'await ready', Authority.AwaitReady(0).ok },
             { 'persisted identity', staff.ok and persisted
                 and persisted.capability_id == staff.value.capabilityId },
-            { 'migration ledger', tonumber(migrations) == 7 }
+            { 'migration ledger', tonumber(migrations) == 8 }
         }
         local passed = 0
         for _, test in ipairs(tests) do
@@ -99,6 +99,50 @@ Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
         print(('[AuthorityFoundationSmokeTest] done %d/%d passed (read-only)'):format(passed, #tests))
     end, debug.traceback)
     if not called then print('[AuthorityFoundationSmokeTest] FAIL ' .. tostring(reason)) end
+end, true)
+
+Authority.RegisterDevCommand('AuthorityCapabilityRegistrationContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local valid = { requestId = 'authority-capability-contract-001', capabilities = {
+        { key = 'staff.admin.contract_test', description = 'Contract-only capability.', riskClass = 'moderate' }
+    } }
+    local first = AuthorityCapabilities.ValidateRegistration(valid)
+    local same = AuthorityCapabilities.ValidateRegistration(Authority.Copy(valid))
+    local changed = Authority.Copy(valid); changed.capabilities[1].riskClass = 'high'
+    local changedResult = AuthorityCapabilities.ValidateRegistration(changed)
+    local function Rejected(mutator)
+        local request = Authority.Copy(valid); mutator(request)
+        return not AuthorityCapabilities.ValidateRegistration(request).ok
+    end
+    local tests = {
+        { 'registration contract', Authority.GetCapabilities().value.features.capabilityRegistrationContracts == 1
+            and Authority.GetCapabilities().value.features.capabilityRegistration == 1 },
+        { 'valid definition', first.ok },
+        { 'untrusted rejected', (function()
+            local result = AuthorityCapabilities.Register(valid, 'untrusted-smoke-caller')
+            return not result.ok and result.code == 'authorization_denied'
+        end)() },
+        { 'stable fingerprint', same.ok and same.value == first.value },
+        { 'payload binding', changedResult.ok and changedResult.value ~= first.value },
+        { 'empty catalog rejected', Rejected(function(r) r.capabilities = {} end) },
+        { 'duplicate key rejected', Rejected(function(r)
+            r.capabilities[2] = Authority.Copy(r.capabilities[1]) end) },
+        { 'bad key rejected', Rejected(function(r) r.capabilities[1].key = 'staff..bad' end) },
+        { 'control text rejected', Rejected(function(r) r.capabilities[1].description = 'Bad\ntext' end) },
+        { 'unknown risk rejected', Rejected(function(r) r.capabilities[1].riskClass = 'extreme' end) },
+        { 'identity injection rejected', Rejected(function(r)
+            r.capabilities[1].capabilityId = '00000000-0000-4000-8000-000000000001' end) },
+        { 'status injection rejected', Rejected(function(r) r.capabilities[1].status = 'active' end) },
+        { 'oversized request rejected', Rejected(function(r) r.requestId = string.rep('a', 129) end) }
+    }
+    local passed = 0
+    for _, test in ipairs(tests) do
+        if test[2] then passed = passed + 1 end
+        print(('[AuthorityCapabilityRegistrationContractSmokeTest] %-27s %s'):format(
+            test[1], test[2] and 'PASS' or 'FAIL'))
+    end
+    print(('[AuthorityCapabilityRegistrationContractSmokeTest] done %d/%d passed (no capabilities registered)'):format(
+        passed, #tests))
 end, true)
 
 Authority.RegisterDevCommand('AuthorityPolicyProviderContractSmokeTest', function(source, args)

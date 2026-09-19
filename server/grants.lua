@@ -119,6 +119,34 @@ function AuthorityGrants.Issue(request, resource)
     return result or Err('transaction_failed', 'Grant did not complete. Retry the same request ID.')
 end
 
+function AuthorityGrants.List(request, resource)
+    local allowed = Authority.CheckRead(resource)
+    if not allowed.ok then return allowed end
+    if type(request) ~= 'table' or not Authority.Uuid(request.roleId) then
+        return Err('invalid_input', 'Role UUID required.')
+    end
+    for field in pairs(request) do
+        if field ~= 'roleId' then return Err('invalid_input', 'Unexpected role grant read field.') end
+    end
+    local rows = MySQL.query.await([[SELECT g.`grant_id`,g.`role_id`,c.`capability_key`,g.`effect`,
+        g.`scope_type`,g.`status`,g.`revision` FROM `feather_authority_role_grants` g
+        JOIN `feather_authority_capabilities` c ON c.`capability_id`=g.`capability_id`
+        WHERE g.`role_id`=? ORDER BY c.`capability_key` LIMIT 129]], { request.roleId:lower() }) or {}
+    if #rows > 128 then return Err('grant_catalog_limit', 'Role grant catalog exceeds 128 entries.') end
+    local result = {}
+    for _, row in ipairs(rows) do
+        if not Authority.Uuid(row.grant_id) or row.effect ~= 'allow'
+            or (row.scope_type ~= 'server' and row.scope_type ~= 'organization')
+            or (row.status ~= 'active' and row.status ~= 'revoked') then
+            return Err('invalid_persistence', 'Persisted role grant is invalid.')
+        end
+        result[#result + 1] = { grantId = row.grant_id, roleId = row.role_id,
+            capabilityKey = row.capability_key, effect = row.effect, scopeType = row.scope_type,
+            status = row.status, revision = tonumber(row.revision) }
+    end
+    return Ok(result)
+end
+
 exports('GrantRoleCapability', function(request)
     local called, result = xpcall(function()
         return AuthorityGrants.Issue(request, GetInvokingResource())
@@ -128,4 +156,7 @@ exports('GrantRoleCapability', function(request)
         return Err('internal_error', 'Authority grant operation failed.')
     end
     return result
+end)
+exports('ListRoleGrants', function(request)
+    return AuthorityGrants.List(request, GetInvokingResource())
 end)

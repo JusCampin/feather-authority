@@ -45,6 +45,8 @@ function Authority.GetCapabilities()
             health = 1,
             migrations = 1,
             capabilityRegistry = 1,
+            capabilityRegistrationContracts = 1,
+            capabilityRegistration = 1,
             roles = 1,
             durableRoleCreation = 1,
             roleGrantContracts = 1,
@@ -96,6 +98,8 @@ function Authority.ValidateConfig()
         or type(Config.DevMode) ~= 'boolean' or type(Config.Access) ~= 'table'
         or type(Config.Access.trustedReaders) ~= 'table'
         or Config.Access.trustedReaders[GetCurrentResourceName()] ~= true
+        or type(Config.Access.trustedCapabilityRegistrars) ~= 'table'
+        or Config.Access.trustedCapabilityRegistrars[GetCurrentResourceName()] ~= true
         or type(Config.Access.trustedRoleCreators) ~= 'table'
         or Config.Access.trustedRoleCreators[GetCurrentResourceName()] ~= true
         or type(Config.Access.trustedGrantors) ~= 'table'
@@ -108,6 +112,12 @@ function Authority.ValidateConfig()
     for resource, enabled in pairs(Config.Access.trustedReaders) do
         if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean' then
             return Authority.Err('invalid_config', 'Trusted reader configuration is invalid.')
+        end
+    end
+    for resource, enabled in pairs(Config.Access.trustedCapabilityRegistrars) do
+        if type(resource) ~= 'string' or #resource < 1 or #resource > 100 or type(enabled) ~= 'boolean'
+            or (enabled and Config.Access.trustedReaders[resource] ~= true) then
+            return Authority.Err('invalid_config', 'Trusted capability registrar configuration is invalid.')
         end
     end
     for resource, enabled in pairs(Config.Access.trustedRoleCreators) do
