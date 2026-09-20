@@ -11,6 +11,43 @@ local function Text(value, maximum)
         and not value:find('%c') and value:find('%S') ~= nil
 end
 
+local function SubjectType(value)
+    return value == 'account' or value == 'character'
+end
+
+local function IsCallable(value)
+    return type(value) == 'function' or (type(value) == 'table'
+        and type(rawget(value, '__cfx_functionReference')) == 'string')
+end
+
+local function ResolveSubject(subjectType, subjectId)
+    if subjectType == 'account' then
+        local identity = exports['feather-core']:GetAccountIdentity(subjectId)
+        if type(identity) ~= 'table' or not identity.ok or type(identity.value) ~= 'table'
+            or identity.value.accountId:lower() ~= subjectId:lower() then
+            return Err('subject_not_found', 'Canonical account subject was not found.')
+        end
+        if identity.value.status ~= 'active' then
+            return Err('subject_inactive', 'Account subject is not active.')
+        end
+        return Ok(identity.value)
+    end
+    local provider = exports['feather-core']:GetProvider('character-profile', nil, 1)
+    local implementation = type(provider) == 'table' and provider.ok and provider.value.implementation or nil
+    if type(implementation) ~= 'table' or not IsCallable(implementation.GetIdentity) then
+        return Err('subject_provider_unavailable', 'Canonical character identity provider is unavailable.')
+    end
+    local identity = implementation.GetIdentity(subjectId)
+    if type(identity) ~= 'table' or not identity.ok or type(identity.value) ~= 'table'
+        or identity.value.characterId:lower() ~= subjectId:lower() then
+        return Err('subject_not_found', 'Canonical character subject was not found.')
+    end
+    if identity.value.status ~= 'active' then
+        return Err('subject_inactive', 'Character subject is not active.')
+    end
+    return Ok(identity.value)
+end
+
 function AuthorityAssignments.ValidateIssue(request)
     if type(request) ~= 'table' then return Err('invalid_input', 'Assignment request required.') end
     local fields = { requestId = true, subjectType = true, subjectId = true, roleId = true,
@@ -19,13 +56,13 @@ function AuthorityAssignments.ValidateIssue(request)
     for field in pairs(request) do
         if not fields[field] then return Err('invalid_input', 'Unexpected assignment field.') end
     end
-    if not Token(request.requestId, 128, false) or request.subjectType ~= 'account'
+    if not Token(request.requestId, 128, false) or not SubjectType(request.subjectType)
         or not Authority.Uuid(request.subjectId) or not Authority.Uuid(request.roleId)
         or not Authority.Integer(request.expectedRoleRevision, 1, 9007199254740991)
         or request.scopeType ~= 'server' or not Text(request.reason, 255)
         or not Token(request.reasonCode, 64, true)
         or (request.validUntil ~= nil and not Authority.Integer(request.validUntil, 1, 4102444800)) then
-        return Err('invalid_input', 'Account, role revision, server scope, expiry, reason, and stable IDs are required.')
+        return Err('invalid_input', 'Subject, role revision, server scope, expiry, reason, and stable IDs are required.')
     end
     local fingerprint = {}
     for _, field in ipairs({ 'subjectType', 'subjectId', 'roleId', 'expectedRoleRevision',
@@ -65,13 +102,13 @@ function AuthorityAssignments.ValidateReplacement(request)
         if not fields[field] then return Err('invalid_input', 'Unexpected assignment replacement field.') end
     end
     local assigning = request.roleId ~= nil or request.expectedRoleRevision ~= nil
-    if not Token(request.requestId, 80, false) or request.subjectType ~= 'account'
+    if not Token(request.requestId, 80, false) or not SubjectType(request.subjectType)
         or not Authority.Uuid(request.subjectId)
         or (assigning and (not Authority.Uuid(request.roleId)
             or not Authority.Integer(request.expectedRoleRevision, 1, 9007199254740991)))
         or request.scopeType ~= 'server' or not Text(request.reason, 255)
         or not Token(request.reasonCode, 64, true) then
-        return Err('invalid_input', 'Account, owned role revision, scope, reason, and stable request ID are required.')
+        return Err('invalid_input', 'Subject, owned role revision, scope, reason, and stable request ID are required.')
     end
     local fingerprint = {}
     for _, field in ipairs({ 'subjectType', 'subjectId', 'roleId', 'expectedRoleRevision',
@@ -85,7 +122,7 @@ end
 local function Snapshot(row)
     if not row then return Err('assignment_not_found', 'Authority assignment was not found.') end
     local revision = tonumber(row.revision)
-    if not Authority.Uuid(row.assignment_id) or row.subject_type ~= 'account'
+    if not Authority.Uuid(row.assignment_id) or not SubjectType(row.subject_type)
         or not Authority.Uuid(row.subject_id) or not Authority.Uuid(row.role_id)
         or row.issuer_type ~= 'service_principal' or type(row.issuer_id) ~= 'string'
         or row.scope_type ~= 'server'
@@ -113,6 +150,64 @@ function AuthorityAssignments.Get(request, resource)
         { request.assignmentId:lower() }))
 end
 
+function AuthorityAssignments.ListSubject(request, resource)
+    local allowed = Authority.CheckRead(resource)
+    if not allowed.ok then return allowed end
+    if type(request) ~= 'table' then return Err('invalid_input', 'Subject assignment request required.') end
+    local fields = { subjectType = true, subjectId = true, scopeType = true,
+        ownerResource = true, status = true }
+    for field in pairs(request) do
+        if not fields[field] then return Err('invalid_input', 'Unexpected subject assignment field.') end
+    end
+    if not SubjectType(request.subjectType) or not Authority.Uuid(request.subjectId)
+        or request.scopeType ~= 'server' or type(request.ownerResource) ~= 'string'
+        or #request.ownerResource < 1 or #request.ownerResource > 100
+        or (request.status ~= nil and request.status ~= 'active'
+            and request.status ~= 'suspended' and request.status ~= 'revoked') then
+        return Err('invalid_input', 'Subject, server scope, owner resource, and valid status are required.')
+    end
+    if resource ~= GetCurrentResourceName() and request.ownerResource ~= resource then
+        return Err('authorization_denied', 'A caller may only list assignments for roles it owns.')
+    end
+    local parameters = { request.subjectType, request.subjectId:lower(), request.ownerResource }
+    local statusSql = ''
+    if request.status then
+        statusSql = ' AND a.`status`=?'
+        parameters[#parameters + 1] = request.status
+        if request.status == 'active' then
+            statusSql = statusSql
+                .. " AND (a.`valid_until` IS NULL OR a.`valid_until`>CURRENT_TIMESTAMP)"
+                .. " AND r.`status`='active'"
+        end
+    end
+    local rows = MySQL.query.await([[SELECT a.*,r.`role_key`,r.`label`,r.`role_class`,
+            r.`owner_resource`,r.`status` AS `role_status`,r.`revision` AS `role_revision`
+        FROM `feather_authority_assignments` a
+        JOIN `feather_authority_roles` r ON r.`role_id`=a.`role_id`
+        WHERE a.`subject_type`=? AND a.`subject_id`=? AND a.`scope_type`='server'
+            AND r.`owner_resource`=?]] .. statusSql .. [[
+        ORDER BY a.`created_at` DESC,a.`assignment_id` DESC LIMIT 51]], parameters) or {}
+    if #rows > 50 then return Err('assignment_result_limit', 'Subject assignment result exceeds 50.') end
+    local values = {}
+    for _, row in ipairs(rows) do
+        local assignment = Snapshot(row)
+        if not assignment.ok then return assignment end
+        if type(row.role_key) ~= 'string' or type(row.label) ~= 'string'
+            or row.role_class ~= 'staff' or row.owner_resource ~= request.ownerResource
+            or (row.role_status ~= 'active' and row.role_status ~= 'retired')
+            or not Authority.Integer(tonumber(row.role_revision), 1, 9007199254740991) then
+            return Err('invalid_persistence', 'Persisted subject assignment role is invalid.')
+        end
+        assignment.value.roleKey = row.role_key
+        assignment.value.roleLabel = row.label
+        assignment.value.roleClass = row.role_class
+        assignment.value.roleOwnerResource = row.owner_resource
+        assignment.value.roleRevision = tonumber(row.role_revision)
+        values[#values + 1] = assignment.value
+    end
+    return Ok(values)
+end
+
 function AuthorityAssignments.Issue(request, resource)
     if Config.Access.trustedAssigners[resource or ''] ~= true then
         return Err('authorization_denied', 'Calling resource is not a trusted assigner.')
@@ -121,12 +216,8 @@ function AuthorityAssignments.Issue(request, resource)
     if not allowed.ok then return allowed end
     local valid = AuthorityAssignments.ValidateIssue(request)
     if not valid.ok then return valid end
-    local identity = exports['feather-core']:GetAccountIdentity(request.subjectId)
-    if type(identity) ~= 'table' or not identity.ok or type(identity.value) ~= 'table'
-        or identity.value.accountId:lower() ~= request.subjectId:lower() then
-        return Err('subject_not_found', 'Canonical account subject was not found.')
-    end
-    if identity.value.status ~= 'active' then return Err('subject_inactive', 'Account subject is not active.') end
+    local identity = ResolveSubject(request.subjectType, request.subjectId)
+    if not identity.ok then return identity end
     request = Authority.Copy(request)
     local result
     local called, committed = pcall(MySQL.startTransaction, function(query)
@@ -156,15 +247,15 @@ function AuthorityAssignments.Issue(request, resource)
             local role = roles[1]
             if not role then return Err('role_not_found', 'Authority role was not found.') end
             if role.status ~= 'active' then return Err('role_inactive', 'Authority role is not active.') end
-            if role.role_class ~= 'staff' then return Err('class_mismatch', 'Account assignments require a staff role.') end
+            if role.role_class ~= 'staff' then return Err('class_mismatch', 'Staff subjects require a staff role.') end
             if tonumber(role.revision) ~= request.expectedRoleRevision then
                 return Err('revision_conflict', 'Authority role revision changed.')
             end
             local existing = query([[SELECT `assignment_id` FROM `feather_authority_assignments`
-                WHERE `subject_type`='account' AND `subject_id`=? AND `role_id`=?
+                WHERE `subject_type`=? AND `subject_id`=? AND `role_id`=?
                     AND `scope_type`='server' AND `status` IN ('active','suspended')
                     AND (`valid_until` IS NULL OR `valid_until`>CURRENT_TIMESTAMP) FOR UPDATE]],
-                { request.subjectId:lower(), request.roleId:lower() }) or {}
+                { request.subjectType, request.subjectId:lower(), request.roleId:lower() }) or {}
             if existing[1] then return Err('assignment_conflict', 'An active assignment already exists.') end
             local ids = query('SELECT UUID() AS `assignment_id`,UUID() AS `event_id`') or {}
             local assignmentId, eventId = ids[1] and ids[1].assignment_id, ids[1] and ids[1].event_id
@@ -173,9 +264,9 @@ function AuthorityAssignments.Issue(request, resource)
             end
             query([[INSERT INTO `feather_authority_assignments`
                 (`assignment_id`,`subject_type`,`subject_id`,`role_id`,`issuer_type`,`issuer_id`,
-                    `scope_type`,`valid_until`,`reason`) VALUES (?,'account',?,?,'service_principal',?,
+                    `scope_type`,`valid_until`,`reason`) VALUES (?,?,?,?,'service_principal',?,
                     'server',FROM_UNIXTIME(?),?)]],
-                { assignmentId, request.subjectId:lower(), request.roleId:lower(), resource,
+                { assignmentId, request.subjectType, request.subjectId:lower(), request.roleId:lower(), resource,
                     request.validUntil, request.reason })
             local rows = query('SELECT * FROM `feather_authority_assignments` WHERE `assignment_id`=? FOR UPDATE',
                 { assignmentId }) or {}
@@ -289,12 +380,8 @@ function AuthorityAssignments.ReplaceOwned(request, resource)
     if not allowed.ok then return allowed end
     local valid = AuthorityAssignments.ValidateReplacement(request)
     if not valid.ok then return valid end
-    local identity = exports['feather-core']:GetAccountIdentity(request.subjectId)
-    if type(identity) ~= 'table' or not identity.ok or type(identity.value) ~= 'table'
-        or identity.value.accountId:lower() ~= request.subjectId:lower() then
-        return Err('subject_not_found', 'Canonical account subject was not found.')
-    end
-    if identity.value.status ~= 'active' then return Err('subject_inactive', 'Account subject is not active.') end
+    local identity = ResolveSubject(request.subjectType, request.subjectId)
+    if not identity.ok then return identity end
     request = Authority.Copy(request)
     local result
     local called, committed = pcall(MySQL.startTransaction, function(query)
@@ -313,7 +400,8 @@ function AuthorityAssignments.ReplaceOwned(request, resource)
             end
             if receipt.result_json then
                 local decoded, value = pcall(json.decode, receipt.result_json)
-                if not decoded or type(value) ~= 'table' or not Authority.Uuid(value.assignmentId) then
+                if not decoded or type(value) ~= 'table'
+                    or (value.cleared ~= true and not Authority.Uuid(value.assignmentId)) then
                     return Err('invalid_persistence', 'Stored assignment replacement receipt is invalid.')
                 end
                 value.replayed = true
@@ -337,9 +425,9 @@ function AuthorityAssignments.ReplaceOwned(request, resource)
             end
             local current = query([[SELECT a.* FROM `feather_authority_assignments` a
                 JOIN `feather_authority_roles` r ON r.`role_id`=a.`role_id`
-                WHERE a.`subject_type`='account' AND a.`subject_id`=? AND a.`scope_type`='server'
+                WHERE a.`subject_type`=? AND a.`subject_id`=? AND a.`scope_type`='server'
                     AND a.`status` IN ('active','suspended') AND r.`owner_resource`=? FOR UPDATE]],
-                { request.subjectId:lower(), resource }) or {}
+                { request.subjectType, request.subjectId:lower(), resource }) or {}
             if role and #current == 1 and current[1].role_id:lower() == request.roleId:lower()
                 and current[1].status == 'active' then
                 local unchanged = Snapshot(current[1])
@@ -382,8 +470,9 @@ function AuthorityAssignments.ReplaceOwned(request, resource)
             end
             query([[INSERT INTO `feather_authority_assignments`
                 (`assignment_id`,`subject_type`,`subject_id`,`role_id`,`issuer_type`,`issuer_id`,
-                    `scope_type`,`reason`) VALUES (?,'account',?,?,'service_principal',?,'server',?)]],
-                { assignmentId, request.subjectId:lower(), request.roleId:lower(), resource, request.reason })
+                    `scope_type`,`reason`) VALUES (?,?,?,?,'service_principal',?,'server',?)]],
+                { assignmentId, request.subjectType, request.subjectId:lower(), request.roleId:lower(), resource,
+                    request.reason })
             local createdRows = query('SELECT * FROM `feather_authority_assignments` WHERE `assignment_id`=?',
                 { assignmentId }) or {}
             local created = Snapshot(createdRows[1])
@@ -421,6 +510,9 @@ exports('IssueAssignment', function(request)
 end)
 exports('GetAssignment', function(request)
     return AuthorityAssignments.Get(request, GetInvokingResource())
+end)
+exports('ListSubjectAssignments', function(request)
+    return AuthorityAssignments.ListSubject(request, GetInvokingResource())
 end)
 exports('ChangeAssignmentStatus', function(request)
     local called, result = xpcall(function()

@@ -98,7 +98,7 @@ local definitions = {
         }
     },
     {
-        id = '004_account_assignments',
+        id = '004_assignments',
         statements = {
             [[CREATE TABLE IF NOT EXISTS `feather_authority_assignments` (
                 `assignment_id` CHAR(36) NOT NULL,
@@ -119,7 +119,8 @@ local definitions = {
                 KEY `idx_authority_subject_assignments` (`subject_type`,`subject_id`,`status`),
                 CONSTRAINT `fk_authority_assignment_role` FOREIGN KEY (`role_id`)
                     REFERENCES `feather_authority_roles` (`role_id`),
-                CONSTRAINT `chk_authority_assignment_subject` CHECK (`subject_type`='account'),
+                CONSTRAINT `chk_authority_assignment_subject`
+                    CHECK (`subject_type` IN ('account','character')),
                 CONSTRAINT `chk_authority_assignment_issuer` CHECK (`issuer_type`='service_principal'),
                 CONSTRAINT `chk_authority_assignment_scope` CHECK (`scope_type`='server'),
                 CONSTRAINT `chk_authority_assignment_status`

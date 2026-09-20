@@ -13,9 +13,10 @@ function AuthorityEvaluation.Validate(request)
     for field in pairs(request) do
         if not fields[field] then return Err('invalid_input', 'Unexpected evaluation field.') end
     end
-    if request.subjectType ~= 'account' or not Authority.Uuid(request.subjectId)
+    if (request.subjectType ~= 'account' and request.subjectType ~= 'character')
+        or not Authority.Uuid(request.subjectId)
         or not CapabilityKey(request.capabilityKey) or request.scopeType ~= 'server' then
-        return Err('invalid_input', 'Account, capability, and server scope are required.')
+        return Err('invalid_input', 'Subject, capability, and server scope are required.')
     end
     return Ok(true)
 end
@@ -46,9 +47,10 @@ function AuthorityEvaluation.Evaluate(request, resource)
         JOIN `feather_authority_role_grants` g ON g.`role_id`=r.`role_id`
             AND g.`capability_id`=? AND g.`effect`='allow' AND g.`scope_type`='server'
             AND g.`status`='active'
-        WHERE a.`subject_type`='account' AND a.`subject_id`=? AND a.`scope_type`='server'
+        WHERE a.`subject_type`=? AND a.`subject_id`=? AND a.`scope_type`='server'
             AND a.`status`='active' AND (a.`valid_until` IS NULL OR a.`valid_until`>CURRENT_TIMESTAMP)
-        ORDER BY a.`assignment_id` LIMIT 1]], { capability.capability_id, request.subjectId:lower() })
+        ORDER BY a.`assignment_id` LIMIT 1]], {
+            capability.capability_id, request.subjectType, request.subjectId:lower() })
     if not row then return Decision(false, 'no_active_assignment', policyVersion) end
     return Decision(true, 'explicit_role_grant', policyVersion,
         row.assignment_id, row.role_id, row.grant_id)
@@ -57,9 +59,10 @@ end
 function AuthorityEvaluation.ListEffective(request, resource)
     local allowed = Authority.CheckRead(resource)
     if not allowed.ok then return allowed end
-    if type(request) ~= 'table' or request.subjectType ~= 'account'
+    if type(request) ~= 'table'
+        or (request.subjectType ~= 'account' and request.subjectType ~= 'character')
         or not Authority.Uuid(request.subjectId) or request.scopeType ~= 'server' then
-        return Err('invalid_input', 'Account subject and server scope are required.')
+        return Err('invalid_input', 'Subject and server scope are required.')
     end
     for field in pairs(request) do
         if field ~= 'subjectType' and field ~= 'subjectId' and field ~= 'scopeType' then
@@ -78,9 +81,9 @@ function AuthorityEvaluation.ListEffective(request, resource)
             AND g.`effect`='allow' AND g.`scope_type`='server' AND g.`status`='active'
         JOIN `feather_authority_capabilities` c ON c.`capability_id`=g.`capability_id`
             AND c.`status`='active'
-        WHERE a.`subject_type`='account' AND a.`subject_id`=? AND a.`scope_type`='server'
+        WHERE a.`subject_type`=? AND a.`subject_id`=? AND a.`scope_type`='server'
             AND a.`status`='active' AND (a.`valid_until` IS NULL OR a.`valid_until`>CURRENT_TIMESTAMP)
-        ORDER BY c.`capability_key` LIMIT 129]], { request.subjectId:lower() }) or {}
+        ORDER BY c.`capability_key` LIMIT 129]], { request.subjectType, request.subjectId:lower() }) or {}
     if #rows > 128 then return Err('capability_catalog_limit', 'Effective capability result exceeds 128.') end
     local capabilities = {}
     for _, row in ipairs(rows) do

@@ -51,6 +51,66 @@ AddEventHandler('onResourceStop', function(resource)
     end
 end)
 
+RegisterCommand('AuthorityReleaseContractSmokeTest', function(source)
+    if source ~= 0 then return end
+    local registered, callable = {}, type(GetRegisteredCommands) == 'function'
+    if callable then
+        for _, command in ipairs(GetRegisteredCommands() or {}) do
+            local name = type(command) == 'table' and command.name or nil
+            if type(name) == 'string' then registered[name] = true end
+        end
+    end
+    local developmentAbsent = callable
+    if callable then
+        for name in pairs(registered) do
+            if name ~= 'AuthorityReleaseContractSmokeTest' and name:sub(1, 9) == 'Authority' then
+                developmentAbsent = false
+                break
+            end
+        end
+    end
+    local health = Authority.GetHealth()
+    local capabilities = Authority.GetCapabilities()
+    local provider = exports['feather-core']:GetProvider('policy', 'feather-authority', 1)
+    local access = Config.Access or {}
+    local adminTrusted = access.trustedReaders and access.trustedReaders['feather-admin'] == true
+        and access.trustedCapabilityRegistrars
+            and access.trustedCapabilityRegistrars['feather-admin'] == true
+        and access.trustedRoleCreators and access.trustedRoleCreators['feather-admin'] == true
+        and access.trustedGrantors and access.trustedGrantors['feather-admin'] == true
+        and access.trustedAssigners and access.trustedAssigners['feather-admin'] == true
+    local fixture = 'feather-authority-tests'
+    local fixtureAbsent = access.trustedReaders[fixture] ~= true
+        and access.trustedCapabilityRegistrars[fixture] ~= true
+        and access.trustedRoleCreators[fixture] ~= true
+        and access.trustedGrantors[fixture] ~= true
+        and access.trustedAssigners[fixture] ~= true
+    local migrations = tonumber(MySQL.scalar.await(
+        'SELECT COUNT(*) FROM `feather_authority_schema_migrations`'))
+    local tests = {
+        { 'service ready', health.ok and health.value.state == 'ready' },
+        { 'server development disabled', Config.DevMode == false },
+        { 'development commands absent', developmentAbsent },
+        { 'fixture trust absent', fixtureAbsent },
+        { 'Admin trust complete', adminTrusted },
+        { 'named provider available', provider.ok and provider.value.provider.owner == 'feather-authority' },
+        { 'production capabilities', capabilities.ok and capabilities.value.contract == 1
+            and capabilities.value.features.assignmentReplacement == 1
+            and capabilities.value.features.assignmentReads == 1
+            and capabilities.value.features.characterAssignments == 1
+            and capabilities.value.features.effectiveCapabilityReads == 1 },
+        { 'migration ledger complete', migrations == 9 }
+    }
+    local passed = 0
+    for _, test in ipairs(tests) do
+        if test[2] then passed = passed + 1 end
+        print(('[AuthorityReleaseContractSmokeTest] %-29s %s'):format(
+            test[1], test[2] and 'PASS' or 'FAIL'))
+    end
+    print(('[AuthorityReleaseContractSmokeTest] done %d/%d passed (read-only)'):format(
+        passed, #tests))
+end, true)
+
 Authority.RegisterDevCommand('AuthorityFoundationSmokeTest', function(source)
     if source ~= 0 then return end
     local called, reason = xpcall(function()
@@ -148,8 +208,13 @@ end, true)
 Authority.RegisterDevCommand('AuthorityPolicyProviderContractSmokeTest', function(source, args)
     if source ~= 0 then return end
     local called, reason = xpcall(function()
-        assert(type(args) == 'table' and #args == 1 and Authority.Uuid(args[1]),
-            'Use <account UUID>')
+        assert(type(args) == 'table' and #args == 1 and tonumber(args[1]),
+            'Use <connected player source>')
+        local playerSource = tonumber(args[1])
+        local account = exports['feather-core']:GetAccountContext(playerSource)
+        local session = exports['feather-core']:GetSessionContext(playerSource)
+        assert(account.ok and session.ok and Authority.Uuid(session.value.characterId),
+            'Active Core character session required')
         local named = exports['feather-core']:GetProvider('policy', 'feather-authority', 1)
         local default = exports['feather-core']:GetProvider('policy', nil, 1)
         local function IsCallable(value)
@@ -159,10 +224,12 @@ Authority.RegisterDevCommand('AuthorityPolicyProviderContractSmokeTest', functio
         assert(named.ok and IsCallable(named.value.implementation.Evaluate),
             'Named Authority policy provider is unavailable')
         local allow = named.value.implementation.Evaluate('staff.players.view', {
-            source = 1, accountId = args[1], caller = 'authority-contract-smoke', subject = {}
+            source = playerSource, accountId = account.value.accountId,
+            characterId = session.value.characterId, caller = 'authority-contract-smoke', subject = {}
         })
         local deny = named.value.implementation.Evaluate('staff.economy.adjust', {
-            source = 1, accountId = args[1], caller = 'authority-contract-smoke', subject = {}
+            source = playerSource, accountId = account.value.accountId,
+            characterId = session.value.characterId, caller = 'authority-contract-smoke', subject = {}
         })
         local system = named.value.implementation.Evaluate('staff.players.view', {
             source = 0, system = true, caller = 'authority-contract-smoke', subject = {}
@@ -171,11 +238,11 @@ Authority.RegisterDevCommand('AuthorityPolicyProviderContractSmokeTest', functio
             { 'named provider installed', AuthorityPolicy.IsInstalled() and named.ok
                 and named.value.provider.owner == 'feather-authority' },
             { 'provider capabilities', named.ok
-                and named.value.provider.capabilities.accountSubjects == 1 },
+                and named.value.provider.capabilities.characterSubjects == 1 },
             { 'Admin remains default', default.ok and default.value.provider.owner == 'feather-admin' },
-            { 'account decision envelope', allow.ok and type(allow.value.allowed) == 'boolean'
+            { 'character decision envelope', allow.ok and type(allow.value.allowed) == 'boolean'
                 and allow.value.code == 'forbidden' and allow.value.policyVersion ~= nil },
-            { 'account deny envelope', deny.ok and deny.value.allowed == false
+            { 'character deny envelope', deny.ok and deny.value.allowed == false
                 and deny.value.code == 'forbidden' },
             { 'system fails closed', system.ok and system.value.allowed == false
                 and system.value.code == 'unsupported_subject' }
@@ -195,13 +262,18 @@ end, true)
 Authority.RegisterDevCommand('AuthorityPolicyProviderLiveTest', function(source, args)
     if source ~= 0 then return end
     local called, reason = xpcall(function()
-        assert(type(args) == 'table' and #args == 3 and Authority.Uuid(args[1])
+        assert(type(args) == 'table' and #args == 3 and tonumber(args[1])
             and Authority.Uuid(args[2]) and type(args[3]) == 'string',
-            'Use <account UUID> <role UUID> <stable requestId>')
+            'Use <connected player source> <role UUID> <stable requestId>')
+        local playerSource = tonumber(args[1])
+        local account = exports['feather-core']:GetAccountContext(playerSource)
+        local session = exports['feather-core']:GetSessionContext(playerSource)
+        assert(account.ok and session.ok and Authority.Uuid(session.value.characterId),
+            'Active Core character session required')
         local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
         assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
-        local issued = AuthorityAssignments.Issue({ requestId = args[3], subjectType = 'account',
-            subjectId = args[1], roleId = args[2], expectedRoleRevision = role.value.revision,
+        local issued = AuthorityAssignments.Issue({ requestId = args[3], subjectType = 'character',
+            subjectId = session.value.characterId, roleId = args[2], expectedRoleRevision = role.value.revision,
             scopeType = 'server', reason = 'Authority provider live acceptance',
             reasonCode = 'development.provider_test' }, GetCurrentResourceName())
         assert(issued.ok, tostring(issued.code) .. ': ' .. tostring(issued.message))
@@ -209,7 +281,8 @@ Authority.RegisterDevCommand('AuthorityPolicyProviderLiveTest', function(source,
         local default = exports['feather-core']:GetProvider('policy', nil, 1)
         assert(named.ok and default.ok and default.value.provider.owner == 'feather-admin',
             'Provider registry ownership changed')
-        local context = { source = 1, accountId = args[1], caller = 'authority-live-test', subject = {} }
+        local context = { source = playerSource, accountId = account.value.accountId,
+            characterId = session.value.characterId, caller = 'authority-live-test', subject = {} }
         local allow = named.value.implementation.Evaluate('staff.players.view', context)
         local deny = named.value.implementation.Evaluate('staff.economy.adjust', context)
         assert(allow.ok and allow.value.allowed and allow.value.code == 'allowed'
@@ -220,8 +293,8 @@ Authority.RegisterDevCommand('AuthorityPolicyProviderLiveTest', function(source,
             'Named provider did not deny ungranted capability')
         assert(allow.value.policyVersion == deny.value.policyVersion,
             'Provider decisions observed inconsistent policy versions')
-        print(('[AuthorityPolicyProviderLiveTest] PASS assignment=%s account=%s allowed=true denied=true attribution=true policyVersion=%d firstReplayed=%s AdminDefaultUnchanged=true activeSessionNotRequired=true'):format(
-            issued.value.assignmentId, args[1], allow.value.policyVersion,
+        print(('[AuthorityPolicyProviderLiveTest] PASS assignment=%s character=%s allowed=true denied=true attribution=true policyVersion=%d firstReplayed=%s AdminDefaultUnchanged=true activeCharacterRequired=true'):format(
+            issued.value.assignmentId, session.value.characterId, allow.value.policyVersion,
             tostring(issued.value.replayed)))
     end, debug.traceback)
     if not called then print('[AuthorityPolicyProviderLiveTest] FAIL ' .. tostring(reason)) end
@@ -230,7 +303,7 @@ end, true)
 Authority.RegisterDevCommand('AuthorityAssignmentContractSmokeTest', function(source)
     if source ~= 0 then return end
     local called, reason = xpcall(function()
-        local valid = { requestId = 'authority-assignment-contract-001', subjectType = 'account',
+        local valid = { requestId = 'authority-assignment-contract-001', subjectType = 'character',
             subjectId = '00000000-0000-4000-8000-000000000001',
             roleId = '00000000-0000-4000-8000-000000000002', expectedRoleRevision = 2,
             scopeType = 'server', validUntil = 1893456000, reason = 'Contract acceptance',
@@ -248,11 +321,15 @@ Authority.RegisterDevCommand('AuthorityAssignmentContractSmokeTest', function(so
         local tests = {
             { 'assignment contract', Authority.GetCapabilities().value.features.assignmentContracts == 1
                 and Authority.GetCapabilities().value.features.assignments == 1 },
-            { 'valid account assignment', first.ok },
+            { 'valid character assignment', first.ok },
             { 'untrusted rejected', not untrusted.ok and untrusted.code == 'authorization_denied' },
             { 'stable fingerprint', same.ok and same.value == first.value },
             { 'payload binding', changedResult.ok and changedResult.value ~= first.value },
-            { 'character subject rejected', Rejected('subjectType', 'character') },
+            { 'account subject accepted', (function()
+                local request = Authority.Copy(valid); request.subjectType = 'account'
+                return AuthorityAssignments.ValidateIssue(request).ok
+            end)() },
+            { 'unknown subject rejected', Rejected('subjectType', 'player') },
             { 'bad subject rejected', Rejected('subjectId', 'not-a-uuid') },
             { 'bad role rejected', Rejected('roleId', 'not-a-uuid') },
             { 'zero revision rejected', Rejected('expectedRoleRevision', 0) },
@@ -275,7 +352,7 @@ end, true)
 
 Authority.RegisterDevCommand('AuthorityAssignmentReplacementContractSmokeTest', function(source)
     if source ~= 0 then return end
-    local valid = { requestId = 'authority-replacement-contract-001', subjectType = 'account',
+    local valid = { requestId = 'authority-replacement-contract-001', subjectType = 'character',
         subjectId = '00000000-0000-4000-8000-000000000001',
         roleId = '00000000-0000-4000-8000-000000000002', expectedRoleRevision = 1,
         scopeType = 'server', reason = 'Contract validation only.',
@@ -290,6 +367,10 @@ Authority.RegisterDevCommand('AuthorityAssignmentReplacementContractSmokeTest', 
     local tests = {
         { 'replacement capability', Authority.GetCapabilities().value.features.assignmentReplacement == 1 },
         { 'valid request', AuthorityAssignments.ValidateReplacement(valid).ok },
+        { 'account subject accepted', (function()
+            local request = Authority.Copy(valid); request.subjectType = 'account'
+            return AuthorityAssignments.ValidateReplacement(request).ok
+        end)() },
         { 'valid clear request', (function()
             local clear = Authority.Copy(valid); clear.roleId = nil; clear.expectedRoleRevision = nil
             return AuthorityAssignments.ValidateReplacement(clear).ok
@@ -321,12 +402,13 @@ Authority.RegisterDevCommand('AuthorityAssignmentLiveTest', function(source, arg
         assert(type(args) == 'table' and #args == 3 and tonumber(args[1])
             and Authority.Uuid(args[2]) and type(args[3]) == 'string',
             'Use <player source> <role UUID> <stable requestId>')
-        local account = exports['feather-core']:GetAccountContext(tonumber(args[1]))
-        assert(account.ok, 'Active Core account context required for the acceptance test')
+        local session = exports['feather-core']:GetSessionContext(tonumber(args[1]))
+        assert(session.ok and Authority.Uuid(session.value.characterId),
+            'Active Core character session required for the acceptance test')
         local role = AuthorityRoles.Get({ roleId = args[2] }, GetCurrentResourceName())
         assert(role.ok, tostring(role.code) .. ': ' .. tostring(role.message))
-        local request = { requestId = args[3], subjectType = 'account',
-            subjectId = account.value.accountId, roleId = role.value.roleId,
+        local request = { requestId = args[3], subjectType = 'character',
+            subjectId = session.value.characterId, roleId = role.value.roleId,
             expectedRoleRevision = role.value.revision, scopeType = 'server',
             reason = 'Authority assignment live acceptance', reasonCode = 'development.live_test' }
         local first = AuthorityAssignments.Issue(request, GetCurrentResourceName())
@@ -345,7 +427,8 @@ Authority.RegisterDevCommand('AuthorityAssignmentLiveTest', function(source, arg
             and staleResult.code == 'assignment_conflict' or staleResult.code == 'revision_conflict'),
             'Stale role revision was accepted')
         local read = AuthorityAssignments.Get({ assignmentId = first.value.assignmentId }, GetCurrentResourceName())
-        assert(read.ok and read.value.subjectId == account.value.accountId
+        assert(read.ok and read.value.subjectType == 'character'
+            and read.value.subjectId == session.value.characterId
             and read.value.issuerId == GetCurrentResourceName(), 'Assignment attribution is invalid')
         local assignmentCount = tonumber(MySQL.scalar.await([[SELECT COUNT(*) FROM
             `feather_authority_assignments` WHERE `assignment_id`=?]], { first.value.assignmentId }))
@@ -353,8 +436,8 @@ Authority.RegisterDevCommand('AuthorityAssignmentLiveTest', function(source, arg
             `feather_authority_assignment_events` WHERE `assignment_id`=?]], { first.value.assignmentId }))
         assert(assignmentCount == 1 and eventCount == 1,
             'Assignment did not produce exactly one identity and audit event')
-        print(('[AuthorityAssignmentLiveTest] PASS assignment=%s account=%s role=%s firstReplayed=%s replayed=true mismatchRejected=true staleRejected=true attribution=true singleAssignmentAudit=true'):format(
-            first.value.assignmentId, account.value.accountId, role.value.roleId,
+        print(('[AuthorityAssignmentLiveTest] PASS assignment=%s character=%s role=%s firstReplayed=%s replayed=true mismatchRejected=true staleRejected=true attribution=true singleAssignmentAudit=true'):format(
+            first.value.assignmentId, session.value.characterId, role.value.roleId,
             tostring(first.value.replayed)))
     end, debug.traceback)
     if not called then print('[AuthorityAssignmentLiveTest] FAIL ' .. tostring(reason)) end
@@ -390,7 +473,7 @@ end, true)
 
 Authority.RegisterDevCommand('AuthorityEvaluationContractSmokeTest', function(source)
     if source ~= 0 then return end
-    local base = { subjectType = 'account', subjectId = '00000000-0000-4000-8000-000000000001',
+    local base = { subjectType = 'character', subjectId = '00000000-0000-4000-8000-000000000001',
         capabilityKey = 'staff.players.view', scopeType = 'server' }
     local function Rejected(field, value)
         local request = Authority.Copy(base); request[field] = value
@@ -404,7 +487,11 @@ Authority.RegisterDevCommand('AuthorityEvaluationContractSmokeTest', function(so
         { 'evaluation capability', Authority.GetCapabilities().value.features.scopedEvaluation == 1 },
         { 'valid request', AuthorityEvaluation.Validate(base).ok },
         { 'untrusted rejected', not denied.ok and denied.code == 'authorization_denied' },
-        { 'character rejected', Rejected('subjectType', 'character') },
+        { 'account subject accepted', (function()
+            local request = Authority.Copy(base); request.subjectType = 'account'
+            return AuthorityEvaluation.Validate(request).ok
+        end)() },
+        { 'unknown subject rejected', Rejected('subjectType', 'player') },
         { 'bad subject rejected', Rejected('subjectId', 'not-a-uuid') },
         { 'bad capability rejected', Rejected('capabilityKey', 'staff..view') },
         { 'unknown scope rejected', Rejected('scopeType', 'organization') },

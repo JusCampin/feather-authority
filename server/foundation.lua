@@ -53,6 +53,8 @@ function Authority.GetCapabilities()
             roleGrants = 1,
             assignmentContracts = 1,
             assignments = 1,
+            characterAssignments = 1,
+            assignmentReads = 1,
             assignmentLifecycle = 1,
             assignmentReplacement = 1,
             scopedEvaluation = 1,
